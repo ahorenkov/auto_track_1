@@ -35,6 +35,7 @@ class PigState:
     first_notif_at: Optional[datetime] = None
     last_notif_at: Optional[datetime] = None
 
+    # Notifications fired for tags to avoid duplicates
     fired_pre15_for_tag: Set[str] = None
     fired_pre30_for_tag: Set[str] = None 
 
