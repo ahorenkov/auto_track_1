@@ -5,6 +5,18 @@ from core.state import InMemoryStateStore
 from core.models import PigState, PosSample, PigState, POI
 from core.repo import CsvRepo
 
+PIG_EVENT_NOT_DETECTED = "Not Detected"
+PIG_EVENT_MOVING = "Moving"
+PIG_EVENT_STOPPED = "Stopped"
+PIG_EVENT_COMPLETED = "Completed"
+
+NOTIF_NONE = ""
+NOTIF_RUN_COMPLETION = "Run Completion"
+NOTIF_POI_PASSAGE = "POI Passage"
+NOTIF_PRE_15 = "15 Minutes before POI"
+NOTIF_PRE_30 = "30 Minutes before POI"
+NOTIF_30_MIN_UPDATE = "30 Minute Update"
+
 @dataclass
 class EngineConfig:
     """Configuration for the engine."""
@@ -12,6 +24,9 @@ class EngineConfig:
     speed_min_mps: float = 0.01
     max_ref_age_minutes: int = 35
     poi_tol_meters: float = 50.0
+    
+    stop_window_seconds: int = 120
+    stop_max_move_meters: float = 50.0
     
 class Engine:
     def __init__(self, repo:object, cfg: Optional[EngineConfig] = None) -> None:
@@ -80,7 +95,7 @@ class Engine:
 
         state.last_dt = cur.dt
         state.last_pos_m = cur_pos_m
-        self.repo.save_state(pig_id, state)
+        
         # self.state_store.save(pig_id, state)
 
         next_poi_pos_m = None
@@ -112,6 +127,26 @@ class Engine:
         state.last_pos_m = cur_pos_m
         state.last_dt = cur.dt
 
+        stop_since = now - timedelta(seconds=self.cfg.stop_window_seconds)
+        recent_for_stop = self.repo.get_recent_positions(pig_id, since=stop_since)
+        pig_event = infer_pig_event(
+            recent_samples=recent_for_stop,
+            cur_pos_m=cur_pos_m,
+            end_poi_pos_m=end_poi_pos_m,
+            gc_to_kp=gc_to_kp,
+            cfg=self.cfg,
+        )   
+
+        notification_type = infer_notification_type(
+            pig_event=pig_event,
+            poi_passed=poi_passed,
+            next_poi=next_poi,
+            eta_to_next_sec=eta_to_next_sec,
+            now=now,
+            state=state,
+        )
+
+        self.repo.save_state(pig_id, state)
 
         return {
             "Pig ID": pig_id,
@@ -128,6 +163,8 @@ class Engine:
             "ETA to End POI (sec)": eta_to_end_sec,
             "Near Next POI": near_next_poi,
             "Passed Next POI": poi_passed,
+            "Pig Event": pig_event,
+            "Notification Type": notification_type,
         }
         
 
@@ -357,4 +394,95 @@ def is_passed_poi(
   now_behind = cur_pos_m >= poi_pos_m
 
   return was_ahead and now_behind
+
+def infer_moving_or_stopped(
+        recent_samples: List[PosSample],
+        gc_to_kp: Dict[int, float],
+        meters_per_channel: float,
+        stop_max_move_meters: float,
+) -> str:
+    
+    if len(recent_samples) < 2:
+        return PIG_EVENT_NOT_DETECTED
+    
+    positions = []
+
+    for s in recent_samples:
+        m = pos_m(s, gc_to_kp, meters_per_channel)
+        if m is not None:
+            positions.append((s.dt, m))
+    
+    if len(positions) < 2:
+        return PIG_EVENT_NOT_DETECTED
+    
+    min_m = min(positions)
+    max_m = max(positions)
+
+    if max_m - min_m <= stop_max_move_meters:
+        return PIG_EVENT_STOPPED
+    
+    return PIG_EVENT_MOVING
+
+def infer_completed(
+    cur_pos_m: Optional[float],
+    end_poi_pos_m: Optional[float],
+    tol_m: float,
+) -> bool:
+    
+    if cur_pos_m is None or end_poi_pos_m is None:
+        return False
+    
+    return abs(cur_pos_m - end_poi_pos_m) <= tol_m
+
+def infer_pig_event(
+        recent_samples: List[PosSample],
+        cur_pos_m: Optional[float],
+        end_poi_pos_m: Optional[float],
+        gc_to_kp: Dict[int, float],
+        cfg: EngineConfig,
+) -> str:
+
+    if not recent_samples:
+        return PIG_EVENT_NOT_DETECTED
+
+    if infer_completed(cur_pos_m, end_poi_pos_m, cfg.poi_tol_meters):
+        return PIG_EVENT_COMPLETED
+
+    return infer_moving_or_stopped(recent_samples, gc_to_kp, cfg.meters_per_channel, cfg.stop_max_move_meters)
+
+def infer_notification_type(
+        *,
+        pig_event: str,
+        poi_passed: bool,
+        next_poi: Optional[POI],
+        eta_to_next_sec: Optional[float],
+        now: datetime,
+        state: PigState,
+) -> str:
+    
+    if pig_event == PIG_EVENT_COMPLETED:
+        return NOTIF_RUN_COMPLETION
+    if poi_passed:
+        return NOTIF_POI_PASSAGE
+    if next_poi is not None and eta_to_next_sec is not None:
+        if 29 * 60 <= eta_to_next_sec <= 31 * 60:
+            if next_poi.tag not in state.fired_pre30_for_tag:
+                state.fired_pre30_for_tag.add(next_poi.tag)
+                return NOTIF_PRE_30
+        if 14 * 60 <= eta_to_next_sec <= 16 * 60:
+            if next_poi.tag not in state.fired_pre15_for_tag:
+                state.fired_pre15_for_tag.add(next_poi.tag)
+                return NOTIF_PRE_15
+    if state.first_notif_at in None:
+        state.first_notif_at = now
+        state.last_notif_at = now
+        return NOTIF_30_MIN_UPDATE
+    
+    if state.last_notif_at is not None:
+        delta = (now - state.last_notif_at).total_seconds()
+        if delta >= 30 * 60:
+            state.last_notif_at = now
+            return NOTIF_30_MIN_UPDATE
+    
+    return NOTIF_NONE
 

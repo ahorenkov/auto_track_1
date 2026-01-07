@@ -39,6 +39,12 @@ class PigState:
     fired_pre15_for_tag: Set[str] = None
     fired_pre30_for_tag: Set[str] = None 
 
+    def __post_init__(self):
+        if self.fired_pre15_for_tag is None:
+            self.fired_pre15_for_tag = set()
+        if self.fired_pre30_for_tag is None:
+            self.fired_pre30_for_tag = set()
+
 if __name__ == "__main__":
     # Example usage
     from datetime import datetime, timezone, timedelta
