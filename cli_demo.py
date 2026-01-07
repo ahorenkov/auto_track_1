@@ -15,8 +15,8 @@ def main() -> None:
 
     gc_to_kp = {}
     samples = [
-        PosSample(dt=datetime(2025, 12, 25, 8, 0, tzinfo=MST), gc=1000, kp=None),
-        PosSample(dt=datetime(2025, 12, 25, 8, 5, tzinfo=MST), gc=1010, kp=None),
+        PosSample(dt=datetime(2025, 12, 25, 8, 0, tzinfo=MST), gc=None, kp=10.0),
+        PosSample(dt=datetime(2025, 12, 25, 8, 10, tzinfo=MST), gc=None, kp=11.0),
     ]
 
     cur = pick_current_sample(samples)
