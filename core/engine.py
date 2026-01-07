@@ -11,6 +11,7 @@ class EngineConfig:
     meters_per_channel: float = 25.0
     speed_min_mps: float = 0.01
     max_ref_age_minutes: int = 35
+    poi_tol_meters: float = 50.0
     
 class Engine:
     def __init__(self, repo:object, cfg: Optional[EngineConfig] = None) -> None:
@@ -82,6 +83,36 @@ class Engine:
         self.repo.save_state(pig_id, state)
         # self.state_store.save(pig_id, state)
 
+        next_poi_pos_m = None
+        end_poi_pos_m = None
+
+        if next_poi:
+            next_poi_pos_m = pos_m(
+                PosSample(dt=datetime.now(), gc=next_poi.global_channel, kp=next_poi.kp),
+                gc_to_kp,
+                self.cfg.meters_per_channel,
+            )
+        if end_poi:
+            end_poi_pos_m = pos_m(
+                PosSample(dt=datetime.now(), gc=end_poi.global_channel, kp=end_poi.kp),
+                gc_to_kp,
+                self.cfg.meters_per_channel,
+            )   
+
+        eta_to_next_sec = eta_seconds(cur_pos_m, next_poi_pos_m, speed_mps)
+        eta_to_end_sec = eta_seconds(cur_pos_m, end_poi_pos_m, speed_mps)
+
+        dist_to_next_m = distance_to_poi_m(cur_pos_m, next_poi, gc_to_kp, self.cfg.meters_per_channel)
+        near_next_poi = is_near_poi(dist_to_next_m, self.cfg.poi_tol_meters)
+
+        poi_passed = False
+        if next_poi_pos_m is not None:
+            poi_passed = is_passed_poi(state, cur_pos_m, next_poi_pos_m)
+        
+        state.last_pos_m = cur_pos_m
+        state.last_dt = cur.dt
+
+
         return {
             "Pig ID": pig_id,
             "Tool Type": tool_type,
@@ -93,6 +124,10 @@ class Engine:
             "Previous POI": prev_poi.tag if prev_poi else None,
             "Next POI": next_poi.tag if next_poi else None,
             "End POI": end_poi.tag if end_poi else None,
+            "ETA to Next POI (sec)": eta_to_next_sec,
+            "ETA to End POI (sec)": eta_to_end_sec,
+            "Near Next POI": near_next_poi,
+            "Passed Next POI": poi_passed,
         }
         
 
@@ -257,5 +292,69 @@ def find_prev_next_end_poi(
 
     return (prev_poi, next_poi, end_poi)
 
+def eta_seconds(
+        cur_pos_m: Optional[float],
+        target_pos_m: Optional[float],
+        speed_mps: Optional[float],
+) -> Optional[float]:
+    
+    if cur_pos_m is None:
+        return None
+    
+    if target_pos_m is None:
+        return None 
+    
+    if speed_mps <= 0.0:   
+        return None
+    
+    distance = cur_pos_m - target_pos_m
+    if distance < 0.0:
+        return None
+    return distance / speed_mps
 
+def distance_to_poi_m(
+        cur_pos_m: Optional[float],
+        poi: Optional[POI],
+        gc_to_kp: Dict[int, float],
+        meters_per_channel: float,
+) -> Optional[float]:
+    
+    if cur_pos_m is None or poi is None:
+        return None
+    
+    fake = PosSample(
+        dt=datetime.now(),
+        gc=poi.global_channel,
+        kp=poi.kp)
+    poi_pos_m = pos_m(fake, gc_to_kp, meters_per_channel)
+    if poi_pos_m is None:
+        return None
+    return poi_pos_m - cur_pos_m
+
+def is_near_poi(
+        dist_m: Optional[float],
+        tol_m: float,
+) -> bool:
+    
+    if dist_m is None:
+        return False
+    
+    return abs(dist_m) <= tol_m
+
+def is_passed_poi(
+        state: PigState,
+        cur_pos_m: Optional[float],
+        poi_pos_m: Optional[float],
+) -> bool:
+  
+  if state.last_pos_m is None:
+      return False
+  if cur_pos_m is None or poi_pos_m is None:
+      return False
+  
+  # Check if an object was before the POI and now is at or beyond it
+  was_ahead = state.last_pos_m < poi_pos_m
+  now_behind = cur_pos_m >= poi_pos_m
+
+  return was_ahead and now_behind
 
