@@ -27,20 +27,14 @@ def main() -> None:
     print(f"Reference sample: {ref}")
     print(f"Computed speed (mps): {speed}")
 
-    for minute in (0, 5, 10):
-        
-        payload = engine.process_pig(
-            pig_id="PIG_001",
-            tool_type="Tool A",
-            now=datetime(2025, 12, 25, 8, minute, tzinfo=MST),
-        )
-
-        print(f'iter minute={minute}')
-        print(json.dumps(payload, ensure_ascii=False, indent=2))
 
     print("gc to kp rows: ", len(repo.get_gc_to_kp()))
     print("POIs: ", len(repo.get_pois()))
     print("Gaps: ", len(repo.get_gaps()))
+
+def dt(hh, mm, ss=0):
+    return datetime(2026, 1, 8, hh, mm, ss, tzinfo=MST)
+
 
 if __name__ == "__main__":
     main()

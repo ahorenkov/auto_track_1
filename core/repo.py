@@ -12,6 +12,8 @@ class CsvRepo:
 
     def __init__(self, base_dir: str = ".") -> None:
         self._state_store = InMemoryStateStore()
+        self._states: Dict[str, PigState] = {}
+
 
         base = Path(base_dir)
 
@@ -23,11 +25,11 @@ class CsvRepo:
         # demo telemetry    
         self._telemetry: Dict[str, List[PosSample]] = {}
 
-    def get_state(self, pig_id:str) -> PigState:
-        return self._state_store.get(pig_id)
+    def get_state(self, pig_id:str) -> Optional[PigState]:
+        return self._states.get(pig_id)
     
     def save_state(self, pig_id: str, state: PigState) -> None:
-        return self._state_store.save(pig_id)
+        self._states[pig_id] = state
     
     def set_demo_telemetry(self, pig_id: str, samples: List[PosSample]) -> None:
         self._telemetry[pig_id] = samples

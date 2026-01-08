@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
-from core.state import InMemoryStateStore
 from core.models import PigState, PosSample, PigState, POI
 from core.repo import CsvRepo
 
@@ -32,18 +31,25 @@ class Engine:
     def __init__(self, repo:object, cfg: Optional[EngineConfig] = None) -> None:
         self.repo = repo
         self.cfg = cfg or EngineConfig()
-        self.state_store = InMemoryStateStore()
 
     def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> dict:
 
-        state: PigState = self.state_store.get(pig_id)
+        telemetry = self.repo.get_telemetry(pig_id)
+        if not telemetry:
+            return {}
+        
+        cur = telemetry[-1]
+        effective_now = now or cur.dt
+
+        state: PigState = self.repo.get_state(pig_id) or PigState()
+        print(f'[DEBUG] state BEFORE for {pig_id}: {state}')
 
         # temporarily imitate a state change
         if state.first_notif_at is None:
-            state.first_notif_at = now
+            state.first_notif_at = effective_now
 
         looback: timedelta = timedelta(minutes=self.cfg.max_ref_age_minutes)
-        since = now - looback
+        since = effective_now - looback
 
         samples: List[PosSample] = self.repo.get_recent_positions(
             pig_id=pig_id,
@@ -54,15 +60,17 @@ class Engine:
             return {
                 "Pig ID": pig_id,
                 "Tool Type": tool_type,
-                "Now": now.isoformat(),
+                "Now": effective_now.isoformat(),
                 "Position m:": None,
                 "Speed mps:": None
             }
         
         cur = pick_current_sample(samples)
         gc_to_kp = self.repo.get_gc_to_kp()
+        
         cur_pos_m = pos_m(cur, gc_to_kp, self.cfg.meters_per_channel)
         ref = pick_ref_sample_at_or_before(samples, cur.dt)
+
         speed_mps = speed_mps_by_ref(
             cur=cur,
             ref=ref,
@@ -82,7 +90,8 @@ class Engine:
             meters_per_channel=self.cfg.meters_per_channel,
         )
 
-        state.legacy_route = route
+        state.locked_legacy_route = route
+
         prev_poi = next_poi = end_poi = None
 
         if route is not None and route in routes:
@@ -93,23 +102,18 @@ class Engine:
                 meters_per_channel=self.cfg.meters_per_channel,
             )
 
-        state.last_dt = cur.dt
-        state.last_pos_m = cur_pos_m
-        
-        # self.state_store.save(pig_id, state)
-
         next_poi_pos_m = None
         end_poi_pos_m = None
 
         if next_poi:
             next_poi_pos_m = pos_m(
-                PosSample(dt=datetime.now(), gc=next_poi.global_channel, kp=next_poi.kp),
+                PosSample(dt=effective_now, gc=next_poi.global_channel, kp=next_poi.kp),
                 gc_to_kp,
                 self.cfg.meters_per_channel,
             )
         if end_poi:
             end_poi_pos_m = pos_m(
-                PosSample(dt=datetime.now(), gc=end_poi.global_channel, kp=end_poi.kp),
+                PosSample(dt=effective_now, gc=end_poi.global_channel, kp=end_poi.kp),
                 gc_to_kp,
                 self.cfg.meters_per_channel,
             )   
@@ -123,12 +127,10 @@ class Engine:
         poi_passed = False
         if next_poi_pos_m is not None:
             poi_passed = is_passed_poi(state, cur_pos_m, next_poi_pos_m)
-        
-        state.last_pos_m = cur_pos_m
-        state.last_dt = cur.dt
 
-        stop_since = now - timedelta(seconds=self.cfg.stop_window_seconds)
+        stop_since = effective_now - timedelta(seconds=self.cfg.stop_window_seconds)
         recent_for_stop = self.repo.get_recent_positions(pig_id, since=stop_since)
+
         pig_event = infer_pig_event(
             recent_samples=recent_for_stop,
             cur_pos_m=cur_pos_m,
@@ -142,16 +144,17 @@ class Engine:
             poi_passed=poi_passed,
             next_poi=next_poi,
             eta_to_next_sec=eta_to_next_sec,
-            now=now,
+            now=effective_now,
             state=state,
         )
-
         self.repo.save_state(pig_id, state)
+        print(f'[DEBUG] state AFTER for {pig_id}: {state}')
+
 
         return {
             "Pig ID": pig_id,
             "Tool Type": tool_type,
-            "Now": now.isoformat(),
+            "Now": effective_now.isoformat(),
             "Sample_time": cur.dt.isoformat(),
             "Position m:": cur_pos_m,
             "Speed mps:": speed_mps,
@@ -271,9 +274,9 @@ def pick_legacy_route(
         meters_per_channel: float,
         ) -> Optional[str]:
     
-    if state.legacy_route is not None:
-        if state.legacy_route in routes:
-            return state.legacy_route
+    if state.locked_legacy_route is not None:
+        if state.locked_legacy_route in routes:
+            return state.locked_legacy_route
         
     if cur_pos_m is None:
         return None
@@ -464,15 +467,12 @@ def infer_notification_type(
         return NOTIF_RUN_COMPLETION
     if poi_passed:
         return NOTIF_POI_PASSAGE
-    if next_poi is not None and eta_to_next_sec is not None:
-        if 29 * 60 <= eta_to_next_sec <= 31 * 60:
-            if next_poi.tag not in state.fired_pre30_for_tag:
-                state.fired_pre30_for_tag.add(next_poi.tag)
-                return NOTIF_PRE_30
-        if 14 * 60 <= eta_to_next_sec <= 16 * 60:
-            if next_poi.tag not in state.fired_pre15_for_tag:
-                state.fired_pre15_for_tag.add(next_poi.tag)
-                return NOTIF_PRE_15
+    if state.fired_pre30_for_tag != next_poi.tag:
+        state.fired_pre30_for_tag = next_poi.tag
+        return NOTIF_PRE_30
+    if state.fired_pre15_for_tag != next_poi.tag:
+        state.fired_pre15_for_tag = next_poi.tag
+        return NOTIF_PRE_15
     if state.first_notif_at in None:
         state.first_notif_at = now
         state.last_notif_at = now
