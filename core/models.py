@@ -45,4 +45,3 @@ class PigState:
     last_event_dt: Optional[datetime] = None
     moving_started_at: Optional[datetime] = None
 
- 
