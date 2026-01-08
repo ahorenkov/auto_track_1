@@ -1,5 +1,5 @@
 GAP.csv
 GCtoKP.csv
 Pig Tracking POI Valves Locations - Monitoring Team_updated(Nov11).csv
-core/__pycache__/
+core/__pycache__/*
 __pycache__/

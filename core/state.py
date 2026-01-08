@@ -16,6 +16,6 @@ class InMemoryStateStore:
         
         return self._states[pig_id]
     
-    def save(self, pig_id: str, state: PigState) -> None:
+    def upsert(self, pig_id: str, state: PigState) -> None:
         '''Persist state for a PIG'''
         self._states[pig_id] = state

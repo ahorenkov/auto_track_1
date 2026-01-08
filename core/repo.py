@@ -1,176 +1,157 @@
-from typing import Dict, List, Optional
+import csv
+import os
 from datetime import datetime
+from typing import List, Dict, Any, Optional
 
-from core.models import PosSample, POI, GapPoint, PigState
+from core.models import POI, GapPoint, PosSample, PigState
 from core.state import InMemoryStateStore
 
-import csv
-from pathlib import Path
+def _pick(row:dict, keys:List[str]) -> dict:
+    """Try keys in order and return a cleaned non-empty string.
+    Return "" if nothing found."""
+    for k in keys:
+        if k in row and (row.get(k) or "").strip():
+            return row.get(k).strip()
+    return ""
 
 class CsvRepo:
-    ''' Demo repo based on CSV files and in-memory telemetry'''
+    """CSV implementation (metadata in CSV files + in-memory demo telemetry)."""
+    def __init__(self, root_dir: str = ".") -> None:
+        self.root_dir = root_dir
 
-    def __init__(self, base_dir: str = ".") -> None:
-        self._state_store = InMemoryStateStore()
-        self._states: Dict[str, PigState] = {}
+        #metadate
+        self._gc_to_kp: Dict[int, float] = {}
+        self._pois: List[POI] = []
+        self._gaps: List[GapPoint] = []
 
+        #state (in-memory for now)
+        self._state = InMemoryStateStore()
 
-        base = Path(base_dir)
-
-        # metadata
-        self._gc_to_kp:  Dict[int, float] = _load_gc_to_kp(str(base / "GCtoKP.csv"))
-        self._pois: List[POI] = _load_pois(str(base / "Pig Tracking POI Valves Locations - Monitoring Team_updated(Nov11).csv"))
-        self._gaps: List[GapPoint] = _load_gaps(str(base / "GAP.csv"))
-
-        # demo telemetry    
+        #demo telemetry
         self._telemetry: Dict[str, List[PosSample]] = {}
+        self._load_all()
 
-    def get_state(self, pig_id:str) -> Optional[PigState]:
-        return self._states.get(pig_id)
-    
-    def save_state(self, pig_id: str, state: PigState) -> None:
-        self._states[pig_id] = state
-    
-    def set_demo_telemetry(self, pig_id: str, samples: List[PosSample]) -> None:
-        self._telemetry[pig_id] = samples
+# ---------- public API (used by Engine) ----------
+def get_gc_to_kp_map(self) -> Dict[int, float]:
+    return self._gc_to_kp
 
-    def get_recent_positions(self, pig_id: str, since: datetime) -> List[PosSample]:
-        samples = self._telemetry.get(pig_id, [])
-        return [s for s in samples if s.dt >= since]
-    
-    def get_pois(self) -> List[POI]:
-        return self._pois
-    
-    def get_gaps(self) -> List[GapPoint]:
-        return self._gaps
-    
-    def get_gc_to_kp(self) -> Dict[int, float]:
-        return self._gc_to_kp
-    
+def get_pois(self) -> List[POI]:
+    return self._pois
 
-# Helpers
+def get_gaps(self) -> List[GapPoint]:
+    return self._gaps
 
-def _pick(row: dict, keys: List[str]) -> Optional[str]:
-    for k in keys:
-        v = row.get(k)
-        if v is not None and str(v).strip() != "":
-            return str(v).strip()
-    return None
 
-def _to_int(s: Optional[str]) -> Optional[int]:
-    if s is None:
-        return None
-    s = s.strip()
-    if s == "":
-        return None
-    try:
-        return int(s)
-    except Exception:
-        return None
+def get_recent_positions(self, pig_id: str, since_dt: datetime) -> List[PosSample]:
+    samples = self._telemetry.get(pig_id, [])
+    return [s for s in samples if s.dt >= since_dt]
 
-def _to_float(s: Optional[str]) -> Optional[float]:
-    if s is None:
-        return None
-    s = s.strip()
-    if s == "":
-        return None
-    try:
-        return float(s)
-    except Exception:
-        return None
-    
+def get_state(self, pig_id: str) -> PigState:
+    return self._state.get(pig_id)
 
+def save_state(self, pig_id: str, state: PigState) -> None:
+    self._state.upsert(pig_id, state)
+
+# ---------- demo helpers ----------
+
+def set_demo_telemetry(self, pig_id: str, samples: List[PosSample]) -> None:
+    # telemtry has to be ordered by dt
+    self._telemetry[pig_id] = sorted(samples, key=lambda s: s.dt)
+
+# ---------- csv loading ----------
+def _load_all(self) -> None:
+    self._gc_to_kp = self._load_gc_to_kp(os.path.join(self.root_dir, "GCtoKP.csv"))
+    self._pois = self._load_pois(os.path.join(self.root_dir, "POI.csv"))
+    self._gaps = self._load_gaps(os.path.join(self.root_dir, "GAP.csv"))
+
+@staticmethod
 def _load_gc_to_kp(path: str) -> Dict[int, float]:
-
-    mapping: Dict[int, float] = {}
-
+    if not os.path.exists(path):
+        return {}
     
-    if not Path(path).exists():
-        return mapping
-    
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            gc_raw = _pick(row, ["Global Channel", "GC", "gc"])
-            kp_raw = _pick(row, ["KP", "kp"])
+    m: Dict[int, float] = {}
+    with open(path, "r", newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            gc_s = _pick(row, ["GC", "Global Channel", "GlobalChannel"])
+            kp_s = _pick(row, ["KP", "Kilometer Post", "KilometerPost"])
 
-            gc = _to_int(gc_raw)
-            kp = _to_float(kp_raw)
-
-            if gc is None or kp is None:
+            if not gc_s or not kp_s:
                 continue
+            try:
+                m[int(float(gc_s))] = float(kp_s)
+            except Exception:
+            # skip bad rows
+                continue
+    return m
 
-            mapping[gc] = kp
-        
-    return mapping
-
+@staticmethod
 def _load_pois(path: str) -> List[POI]:
-    pois: List[POI] = []
-
-    if not Path(path).exists():
-        return pois
+    if not os.path.exists(path):
+        return []
     
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            tag = _pick(row, ["Valve Tag", "valve tag", "valve_tag", "Tag", "tag"])
-            legacy = _pick(row, ["Legacy Route Name", "Legacy_Route_Name", "route", "legacy_route"])
-            valve_type = _pick(row, ["Valve Type", "valve_type", "valve type"])
-
-            if tag is None or legacy is None:
+    out: List[POI] = []
+    with open(path, "r", newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            tag = _pick(row, ["Tag", "Valve Tag", "tag", "valve tag", "ValveTag", "Valve_Tag"])
+            if not tag:
                 continue
 
-            gc_raw = _pick(row, ["GlobalChannel", "GC", "gc"])
-            kp_raw = _pick(row, ["KP", "kp"])
+            legacy = _pick(row, ["Legacy Route Name", "LegacyRouteName", "Legacy_Route", "LegacyRoute", "route"])
+            valve_type = _pick(row, ["Type", "Valve Type", "valve type", "ValveType", "Valve_Type"])
 
-            gc = _to_int(gc_raw)
-            kp = _to_float(kp_raw)
+            gc_s = _pick(row, ["GC", "Global Channel", "GlobalChannel"])
+            kp_s = _pick(row, ["KP", "Kilometer Post", "KilometerPost"])
 
-            vt = (valve_type or "").strip()
+            gc: Optional[int] = None
+            kp: Optional[float] = None
 
-            pois.append(
-                POI(
-                    tag=tag.strip(),
-                    valve_type=vt,
-                    global_channel=gc,
-                    kp=kp,
-                    legacy_route=legacy.strip()
-                )
-            )
+            try:
+                if gc_s:
+                    gc = int(float(gc_s))
+            except Exception:
+                    gc = None
+            try:
+                if kp_s:
+                    kp = float(kp_s)
+            except Exception:
+                kp = None
 
-    return pois
+            out.append(POI(tag=tag, valve_type=valve_type, gc=gc, kp=kp, legacy_route_name=legacy))
 
-def _load_gaps(path:str) -> List[GapPoint]:
-    gaps: List[GapPoint] = []
+    return out
 
-    if not Path(path).exists():
-        return gaps
-    
-    with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            legacy = _pick(row, ["Legacy Route Name", "Legacy_Route_Name", "route", "legacy_route"])
-            kp_raw = _pick(row, ["KP", "kp"])
-            kind = _pick(row, ["Kind", "kind"])
+@staticmethod
+def _load_gaps(path: str) -> List[GapPoint]:
+    """gap.csv format (flexible headers)
+    legacy route name, gap start/end, kp
+    """
 
-            if legacy is None or kind is None or kp_raw is None:
+    if not os.path.exists(path):
+        return []
+
+    out: List[GapPoint] = []
+    with open(path, "r", newline='', encoding='utf-8') as f:
+        for row in csv.DictReader(f):
+            legacy = _pick(row, ["Legacy Route Name", "LegacyRouteName", "Legacy_Route", "LegacyRoute", "route"])
+            kind_row = _pick(row, ["Gap Start/End", "GapStartEnd", "Gap_Start_End", "gap start/end", "type", "Kind", "kind"])
+            kp_s = _pick(row, ["KP", "Kilometer Post", "KilometerPost"])
+
+            if not kp_s:
                 continue
 
-            kind_norm = kind.strip().lower()
-            if kind_norm not in ("start", "end"):
-                continue
-            
-            kp = _to_float(kp_raw)
-            if kp is None:
+            try:
+                kp = float(kp_s)
+            except Exception:
                 continue
 
-            gaps.append(
-                GapPoint(
-                    legacy_route=legacy.strip(),
-                    kind=kind_norm,
-                    kp=kp
-                )
-            )
+            kind = "start" if "start" in kind_row else ("end" if "end" in kind_row else "")
+            if not kind:
+                continue
 
-    return gaps
+            out.append(GapPoint(legacy_route_name=legacy, kind=kind, kp=kp))
 
+    return out
+
+
+
+                
