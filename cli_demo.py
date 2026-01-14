@@ -1,38 +1,49 @@
-import json
-import os
-from datetime import datetime, timezone, timedelta
-from core.engine import Engine, EngineConfig, pick_current_sample, pick_ref_sample_at_or_before, speed_mps_by_ref
-from core.state import InMemoryStateStore, PigState
-from core.repo import CsvRepo
-from core.models import PigState, PosSample
+from __future__ import annotations
 
-MST = timezone(timedelta(hours=-7), "MST")
+import json
+from datetime import datetime, timedelta, timezone
+
+from core.engine import Engine, EngineConfig
+from core.repo import CsvRepo
+from core.models import PosSample
+
+
+print( 'CLI Demo Running...' )
+MST = timezone(timedelta(hours=-7), name="MST")
+
 
 def main() -> None:
-    repo = CsvRepo(".") 
-    engine = Engine(repo)
+    repo = CsvRepo(root_dir=".")  # expects POI.csv, GCtoKP.csv, gap.csv in current folder
 
-    cfg = EngineConfig(meters_per_channel=25.0, speed_min_mps=0.01, max_ref_age_minutes=35)
+    pig_id = "PIG_001"
+    tool_type = "UnknownTool"
+    now = datetime(2025, 12, 23, 8, 10, 0, tzinfo=MST)
 
-    gc_to_kp = {}
-    samples = [
-        PosSample(dt=datetime(2025, 12, 25, 8, 0, tzinfo=MST), gc=None, kp=10.0),
-        PosSample(dt=datetime(2025, 12, 25, 8, 10, tzinfo=MST), gc=None, kp=11.0),
-    ]
-    s = repo.get_state("pig_1")
-    s.locked_legacy_route = "route_1"
-    repo.save_state("pig_1", s)
+    # Demo telemetry: include enough history (35 min) for long-window speed ref.
+    repo.set_demo_telemetry(
+        pig_id,
+        [
+            PosSample(dt=now - timedelta(minutes=35), gc=11900),
+            PosSample(dt=now - timedelta(minutes=25), gc=11940),
+            PosSample(dt=now - timedelta(minutes=12), gc=12000),
+            PosSample(dt=now - timedelta(minutes=10), gc=12005),
+            PosSample(dt=now - timedelta(minutes=5), gc=12020),
+            PosSample(dt=now - timedelta(minutes=3), gc=12022),
+            PosSample(dt=now - timedelta(minutes=1), gc=12025),
+            PosSample(dt=now, gc=12026),
+        ],
+    )
 
-    s2 = repo.get_state("pig_1")
-    print(s2.locked_legacy_route)
-    
-    print("gc to kp rows: ", len(repo._load_gc_to_kp(os.path.join(repo.root_dir, "GCtoKP.csv"))))
-    print("POIs: ", len(repo._load_pois(os.path.join(repo.root_dir, "Pig Tracking POI Valves Locations - Monitoring Team_updated(Nov11).csv"))))
-    print("Gaps: ", len(repo._load_gaps(os.path.join(repo.root_dir, "GAP.csv"))))
-
-def dt(hh, mm, ss=0):
-    return datetime(2026, 1, 8, hh, mm, ss, tzinfo=MST)
+    engine = Engine(repo, cfg=EngineConfig())
+    payload = engine.process_pig(pig_id=pig_id, tool_type=tool_type, now=now)
+    print(json.dumps(payload, ensure_ascii=False))
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        print(f"Error: {e}")
+    print('Press Enter to exit...')

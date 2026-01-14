@@ -49,6 +49,26 @@ class Engine:
 
         return gc_to_kp.get(gc)
     
+    def _pos_m(self, sample: PosSample) -> Optional[float]:
+        """Convert a PosSample to position in meters.
+        Priority:
+        1. If KP is provided -> meters = KP * 1000
+        2. Else if GC is provided and mapping exists in GC-to-KP map -> meters = mapped KP * 1000
+        3. Else if GC is provided but no mapping -> meters = GC * (meters_per_channel)
+        4. Else -> None
+        """
+
+        if sample.kp is not None:
+            return float(sample.kp) * 1000.0
+
+        if sample.gc is not None:
+            kp = self._kp_from_gc(int(sample.gc))
+            if kp is not None:
+                return float(kp) * 1000.0
+            return float(sample.gc) * float(self.cfg.meters_per_channel)
+    
+        return None
+    
     def _build_routes(self, pois: List[POI]) -> Dict[str, List[POI]]:
         """Group POIs by legacy route and sort by postision(KP preffered)."""
 
@@ -582,25 +602,7 @@ class Engine:
         }
         
 
-def _pos_m(self, sample: PosSample) -> Optional[float]:
-    """Convert a PosSample to position in meters.
-    Priority:
-    1. If KP is provided -> meters = KP * 1000
-    2. Else if GC is provided and mapping exists in GC-to-KP map -> meters = mapped KP * 1000
-    3. Else if GC is provided but no mapping -> meters = GC * (meters_per_channel)
-    4. Else -> None
-    """
 
-    if sample.kp is not None:
-        return float(sample.kp) * 1000.0
-    
-    if sample.gc is not None:
-        kp = self._kp_from_gc(int(sample.gc))
-        if kp is not None:
-            return float(kp) * 1000.0
-        return float(sample.gc) * float(self.cfg.meters_per_channel)
-    
-    return None
 
 def pick_current_sample(samples: List[PosSample]) -> Optional[PosSample]:
     if not samples:
