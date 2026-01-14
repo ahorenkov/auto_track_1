@@ -86,6 +86,7 @@ class CsvRepo:
     
     @staticmethod
     def _load_pois(path: str) -> List[POI]:
+        #  List[POI] format: [(tag, valve type, global channel, kp, legacy route)]
         if not os.path.exists(path):
             return []
         
@@ -117,7 +118,7 @@ class CsvRepo:
                     kp = None
     
                 out.append(POI(tag=tag, valve_type=valve_type, global_channel=gc, kp=kp, legacy_route=legacy))
-    
+
         return out
     
     @staticmethod
@@ -148,7 +149,7 @@ class CsvRepo:
                 if not kind:
                     continue
                 
-                out.append(GapPoint(legacy_route_name=legacy, kind=kind, kp=kp))
+                out.append(GapPoint(legacy_route=legacy, kind=kind, kp=kp))
     
         return out
     

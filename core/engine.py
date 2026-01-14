@@ -4,17 +4,13 @@ from typing import Optional, Dict, List, Tuple
 from core.models import PigState, PosSample, PigState, POI
 from core.repo import CsvRepo
 
-PIG_EVENT_NOT_DETECTED = "Not Detected"
-PIG_EVENT_MOVING = "Moving"
-PIG_EVENT_STOPPED = "Stopped"
-PIG_EVENT_COMPLETED = "Completed"
 
-NOTIF_NONE = ""
-NOTIF_RUN_COMPLETION = "Run Completion"
+NOTIF_COMPLETION = "Completed"
 NOTIF_POI_PASSAGE = "POI Passage"
-NOTIF_PRE_15 = "15 Minutes before POI"
-NOTIF_PRE_30 = "30 Minutes before POI"
-NOTIF_30_MIN_UPDATE = "30 Minute Update"
+NOTIF_PRE_15 = "15 Min Notification"
+NOTIF_PRE_30 = "30 Min Notification"
+NOTIF_30MIN_UPDATE = "30 Min Update"
+
 
 @dataclass
 class EngineConfig:
@@ -23,14 +19,307 @@ class EngineConfig:
     speed_min_mps: float = 0.01
     max_ref_age_minutes: int = 35
     poi_tol_meters: float = 50.0
+    meters_per_channel: float = 25.0
     
+    # stop detection parameters
     stop_window_seconds: int = 120
-    stop_max_move_meters: float = 50.0
+    stop_span_tol_m: float = 50.0
+
+    # speed/eta
+    speed_search_sec: int = 25 * 60 # 25 minutes back
+    speed_window_sec: int = 25 * 60 # try to use 25 minutes delta
+    speed_short_window_sec: int = 5 * 60 # 5 minutes right after start
+    moving_boost_sec: int = 25 * 60 # first 25 minutes after moving start
+    
+
     
 class Engine:
     def __init__(self, repo:object, cfg: Optional[EngineConfig] = None) -> None:
         self.repo = repo
         self.cfg = cfg or EngineConfig()
+
+    def _kp_from_gc(self, gc:int) -> Optional[float]:
+        """Conver GC to KP using mapping loaded by repo.
+        Returns None if mapping doens't have this GC."""
+
+        gc_to_kp = self.repo.get_gc_to_kp()
+
+        return gc_to_kp.get(gc)
+    
+    def _build_routes(self, pois: List[POI]) -> Dict[str, List[POI]]:
+        """Group POIs by legacy route and sort by postision(KP preffered)."""
+
+        routes: Dict[str, List[POI]] = {}
+
+        for p in pois:
+            routes.setdefault(p.legacy_route, []).append(p)
+
+            def poi_sort_key(p:POI) -> float:
+                # prefer KP if available; otherwise approximate GC
+                if p.kp is not None:
+                    return float(p.kp)
+                if p.global_channel is not None:
+                    return float(p.global_channel) / 1000.0
+                return 0.0
+            
+            for route_name in routes:
+                routes[route_name].sort(key=poi_sort_key)
+
+            return routes
+        
+    def _pick_legacy_route(self, routes: Dict[str, List[POI]], state: PigState) -> str:
+        """Sticky route selection:
+        if state.locked_legacy_route exists and still present -> use it
+        else pick the longest route (most POIs) and lock it
+        """
+        if state.locked_legacy_route and state.locked_legacy_route in routes:
+            return state.locked_legacy_route
+        
+        if not routes:
+            return "unknown"
+        
+        # pick route with most POIs
+        chosen = max(routes.keys(), key=lambda r: len(routes[r]))
+        state.locked_legacy_route = chosen
+        return chosen
+    
+    def _poi_pos_m(self, poi: POI) -> Optional[float]:
+        """convert POI to position in meters.
+        if kp exists -> kp * 1000
+        else if gc exists -> try gc -> kp then kp*1000, elso GC * meters_per_channel
+        """
+        if poi.kp is not None:
+            return float(poi.kp) * 1000.0
+        
+        if poi.global_channel is not None:
+            kp = self._kp_from_gc(int(poi.global_channel))
+            if kp is not None:
+                return float(kp) * 1000.0
+            return float(poi.global_channel) * float(self.cfg.meters_per_channel)
+        
+        return None
+    
+    def _find_prev_next_end(self, route_pois: List[POI], cur_pos_m: float) -> Tuple[Optional[POI], Optional[POI], Optional[POI]]:
+        """Given sorted POIs and current position in meters:
+        prev_poi: last poi with pos <= cur_pos_m
+        next_poi: first poi with pos > cur_pos_m
+        end_poi: last poi in the route
+        """
+        if not route_pois:
+            return None, None, None
+        
+        # compute positions once
+        items: List[Tuple[POI, float]] = []
+        for p in route_pois:
+            pm = self._poi_pos_m(p)
+            if pm is None:
+                continue
+            items.append((p, pm))
+        
+        if not items:
+            return None, None, None
+        
+        end_poi = items[-1][0]
+        prev_poi: Optional[POI] = None
+        next_poi: Optional[POI] = None
+
+        for p, pm in items:
+            if pm <= cur_pos_m:
+                prev_poi = p
+            else:
+                next_poi = p
+                break
+        
+        return prev_poi, next_poi, end_poi
+    
+    def _positions_span_m(self, samples: List[PosSample]) -> Optional[float]:
+        """Return (max_pos_m - min_pos_m) for the given samples.
+        Ignores samples with unknown position.
+        Returns None if no valid positions."""
+
+        positions: List[float] = []
+        for s in samples:
+            pm = self._pos_m(s)
+            if pm is not None:
+                positions.append(pm)
+        if not positions:
+            return None
+        
+        return max(positions) - min(positions)
+    
+    def _infer_pig_event(self, pig_id: str, cur: PosSample, cur_pos_m: float, end_poi: Optional[POI]) -> str:
+        """Decide pig event based on telemetry time and recent motion
+        Priority:
+        1. Completed if clost to the end POI
+        2. Stopped if span in last stop_window_seconds is within stop_span_tol_m
+        3. Moving otherwise
+        """
+
+        # 1. Completed
+        if end_poi is not None:
+            end_m = self._poi_pos_m(end_poi)
+            if end_m is not None and abs(cur_pos_m - end_m) <= float(self.cfg.poi_tol_meters):
+                return "Completed"
+        # 2. Stopped
+        since_dt = cur.dt - timedelta(seconds=int(self.cfg.stop_window_seconds))
+        recent = self.repo.get_recent_positions(pig_id, since_dt)
+        span = self._positions_span_m(recent)
+
+        if span is not None and span <= float(self.cfg.stop_span_tol_m):
+            return "Stopped"
+        # 3. Moving
+
+        return "Moving"
+    
+    def _update_event_state(self, state: PigState, new_event: str, event_dt) -> None:
+        """update PigState transitions:
+        last event/last event dt always reflect latest event decision
+        moving started_at is set when Stopped -> Moving transition occurs"""
+        
+        prev_event = state.last_event
+
+        # transtion decision: event changed
+        if prev_event != new_event:
+            # if we start moving after being stopped , mark moving started at
+            # Implement RESUMPTION EVENT in the future
+            if prev_event == "Stopped" and new_event == "Moving":
+                state.moving_started_at = event_dt
+        
+        state.last_event = new_event
+        state.last_event_dt = event_dt
+
+    def _select_speed_window_sec(self, state: PigState, cur_dt) -> int:
+        """Choose speed window:
+        if we started moving recently (within moving_boost_sec) -> use short window
+        else use regular window
+        """
+        if state.moving_started_at is None:
+            return int(self.cfg.speed_window_sec)
+        
+        # how long pig has been moving since last start
+        age_sec = (cur_dt - state.moving_started_at).total_seconds()
+        if age_sec <= float(self.cfg.moving_boost_sec):
+            return int(self.cfg.speed_short_window_sec)
+        
+        return int(self.cfg.speed_window_sec)
+    
+    def _pick_reference_sample(self, pig_id: str, cur_dt, target_dt) -> Optional[PosSample]:
+        """Return sample closest to target_dt among recent positions.
+        Uses repo.get_recent_positions(pig_id, since_dt) to limit data.
+        """
+        # ask repo for enough history
+        since_dt = target_dt - timedelta(seconds=int(self.cfg.speed_search_sec))
+        recent = self.repo.get_recent_positions(pig_id, since_dt)
+        if not recent:
+            return None
+        
+        # choose sample with minimal abs(timediff)
+        best: Optional[PosSample] = None
+        best_abs: Optional[float] = None
+        for s in recent:
+            diff = abs((s.dt - target_dt).total_seconds())
+            if best_abs is None or diff < best_abs:
+                best = s
+                best_abs = diff
+
+        return best
+    
+    def _calc_speed_mps(self, cur: PosSample, cur_pos_m: float, ref: PosSample) -> Optional[float]:
+        """ speed = delta_pos / delta_time
+        returns None if dt invalid or ref position unknown
+        """
+        ref_pos_m = self._pos_m(ref)
+        if ref_pos_m is None:
+            return None
+        
+        dt_sec = (cur.dt - ref.dt).total_seconds()
+        if dt_sec <= 0:
+            return None
+        
+        return (cur_pos_m - ref_pos_m) / dt_sec
+    
+    def _eta_second(self, cur_pos_m: float, target_pos_m: float, speed_mps: float) -> Optional[float]:
+        """ETA in seconds to reach target position.
+        returns None if speed invalid or taget behind current position
+        """
+        if speed_mps is None or speed_mps <= 0.0:
+            return None
+        
+        dist_m = target_pos_m - cur_pos_m
+        if dist_m < 0.0:
+            return None
+        
+        return int(dist_m / speed_mps)
+    
+    def _find_poi_passage(self, route_pois: List[POI], cur_pos_m: float) -> Optional[POI]:
+        """Return POI if current position is within poi_tol_meters
+        Picks the closest  POI (minimal abs distance)
+        """
+        tol = float(self.cfg.poi_tol_meters)
+        best_poi: Optional[POI] = None
+        best_abs: Optional[float] = None
+
+        for p in route_pois:
+            pm = self._poi_pos_m(p)
+            if pm is None:
+                continue
+
+            d = abs(cur_pos_m - pm)
+            if d <= tol:
+                if best_abs is None or d < best_abs:
+                    best_abs = d
+                    best_poi = p
+            
+        return best_poi
+    
+    def _infer_30min_update(self, state: PigState, cur_dt) -> bool:
+        """Returns True if 30-min update notification should be sent.
+        Rule:
+        On first ever run -> True (and set first/last)
+        then every >= 30 minutes since last_notif_at"""
+
+        if state.first_notif_at is None:
+            state.first_notif_at = cur_dt
+            state.last_notif_at = cur_dt
+            return True
+        
+        if state.last_notif_at is None:
+            state.last_notif_at = cur_dt
+            return True
+        
+        delta_sec = (cur_dt - state.last_notif_at).total_seconds()
+        if delta_sec >= 30 * 60:
+            state.last_notif_at = cur_dt
+            return True
+        
+        return False
+    
+    def _infer_pre_poi_notification(self, state: PigState, next_poi: Optional[POI], eta_next_sec: Optional[float]) -> str:
+        """Decid pre-POI notification type: based on ETA to next POI
+        if ETA within 30 minutes +/- 60s and not fired for this tag -> "30 Min Notification"
+        if ETA within 15 minutes +/- 60s and not fired for this tag -> "15 Min Notification"
+        Uses state.fired_pre30_for_tag / fired_pre15_for_tag for dedup
+        """
+        if next_poi is None or eta_next_sec is None:
+            return ""
+        
+        tag = next_poi.tag
+        tol = 60 # seconds tolerance
+
+        # 30 Min Notification
+        if (30 * 60 - tol) <= eta_next_sec <= (30 * 60 + tol):
+            if state.fired_pre30_for_tag != tag:
+                state.fired_pre30_for_tag = tag
+                return NOTIF_PRE_30
+            
+        # 15 Min Notification
+        if (15 * 60 - tol) <= eta_next_sec <= (15 * 60 + tol):
+            if state.fired_pre15_for_tag != tag:
+                state.fired_pre15_for_tag = tag
+                return NOTIF_PRE_15
+            
+        return ""
+
 
     def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> dict:
 
@@ -43,6 +332,73 @@ class Engine:
 
         state: PigState = self.repo.get_state(pig_id) or PigState()
         print(f'[DEBUG] state BEFORE for {pig_id}: {state}')
+
+        pois = self.repo.get_pois()
+        routes = self._build_routes(pois)
+        route_name = self._pick_legacy_route(routes, state)
+        route_pois = routes.get(route_name, [])
+
+        cur_pos_m = self._pos_m(cur)
+        if cur_pos_m is None:
+            # position unknown -> still save state and return minimal payload
+            self.repo.save_state(pig_id, state)
+            return {
+                "Pig ID": pig_id,
+                "Tool Type": tool_type,
+                "Legacy Route": route_name,
+                "Position m:": None,
+                "Prev POI": "",
+                "Next POI": "",
+                "End POI": "",
+                "Notification Type": ""
+            }
+        prev_poi, next_poi, end_poi = self._find_prev_next_end(route_pois, cur_pos_m)
+        pig_event = self._infer_pig_event(pig_id, cur, cur_pos_m, end_poi)
+        self._update_event_state(state, pig_event, cur.dt)
+
+        # speed window based on moving_started_at
+        window_sec = self._select_speed_window_sec(state, cur.dt)
+        target_dt = cur.dt - timedelta(seconds=window_sec) 
+
+        ref = self._pick_reference_sample(pig_id, cur.dt, target_dt)
+        speed_mps: Optional[float] = None
+        if ref is not None:
+            speed_mps = self._calc_speed_mps(cur, cur_pos_m, ref)
+
+        eta_next: Optional[int] = None
+        if next_poi is not None:
+            next_m = self._poi_pos_m(next_poi)
+            if next_m is not None:
+                eta_next = self._eta_second(cur_pos_m, next_m, speed_mps)
+        eta_end: Optional[int] = None
+        if end_poi is not None:
+            end_m = self._poi_pos_m(end_poi)
+            if end_m is not None:
+                eta_end = self._eta_second(cur_pos_m, end_m, speed_mps)
+        
+
+
+
+        self.repo.save_state(pig_id, state)
+
+
+
+        return {
+            "Pig ID": pig_id,
+            "Tool Type": tool_type,
+            "Legacy Route": route_name,
+            "Position m:": round(cur_pos_m, 1),
+            "Prev POI": prev_poi.tag if prev_poi else "",
+            "Next POI": next_poi.tag if next_poi else "",  
+            "End POI": end_poi.tag if end_poi else "",
+            "Notification Type": "",
+            "Pig Event": pig_event,
+            "Speed mps:": round(speed_mps, 2) if speed_mps is not None else None,
+            "ETA to Next POI (sec)": eta_next,
+            "ETA to End POI (sec)": eta_end,
+        }
+    
+    
 
         # temporarily imitate a state change
         if state.first_notif_at is None:
@@ -65,128 +421,48 @@ class Engine:
                 "Speed mps:": None
             }
         
-        cur = pick_current_sample(samples)
-        gc_to_kp = self.repo.get_gc_to_kp()
         
-        cur_pos_m = pos_m(cur, gc_to_kp, self.cfg.meters_per_channel)
-        ref = pick_ref_sample_at_or_before(samples, cur.dt)
-
-        speed_mps = speed_mps_by_ref(
-            cur=cur,
-            ref=ref,
-            gc_to_kp=gc_to_kp,
-            speed_min_mps=self.cfg.speed_min_mps,
-            meters_per_channel=self.cfg.meters_per_channel,
-        )
-
-        pois = self.repo.get_pois()
-        routes = build_routes(pois)
-
-        route = pick_legacy_route(
-            state=state,
-            routes=routes,
-            cur_pos_m=cur_pos_m,
-            gc_to_kp=gc_to_kp,
-            meters_per_channel=self.cfg.meters_per_channel,
-        )
-
-        state.locked_legacy_route = route
-
-        prev_poi = next_poi = end_poi = None
-
-        if route is not None and route in routes:
-            prev_poi, next_poi, end_poi = find_prev_next_end_poi(
-                route_pois=routes[route],
-                cur_pos_m=cur_pos_m,
-                gc_to_kp=gc_to_kp,
-                meters_per_channel=self.cfg.meters_per_channel,
-            )
-
-        next_poi_pos_m = None
-        end_poi_pos_m = None
-
-        if next_poi:
-            next_poi_pos_m = pos_m(
-                PosSample(dt=effective_now, gc=next_poi.global_channel, kp=next_poi.kp),
-                gc_to_kp,
-                self.cfg.meters_per_channel,
-            )
-        if end_poi:
-            end_poi_pos_m = pos_m(
-                PosSample(dt=effective_now, gc=end_poi.global_channel, kp=end_poi.kp),
-                gc_to_kp,
-                self.cfg.meters_per_channel,
-            )   
-
-        eta_to_next_sec = eta_seconds(cur_pos_m, next_poi_pos_m, speed_mps)
-        eta_to_end_sec = eta_seconds(cur_pos_m, end_poi_pos_m, speed_mps)
-
-        dist_to_next_m = distance_to_poi_m(cur_pos_m, next_poi, gc_to_kp, self.cfg.meters_per_channel)
-        near_next_poi = is_near_poi(dist_to_next_m, self.cfg.poi_tol_meters)
-
-        poi_passed = False
-        if next_poi_pos_m is not None:
-            poi_passed = is_passed_poi(state, cur_pos_m, next_poi_pos_m)
-
-        stop_since = effective_now - timedelta(seconds=self.cfg.stop_window_seconds)
-        recent_for_stop = self.repo.get_recent_positions(pig_id, since=stop_since)
-
-        pig_event = infer_pig_event(
-            recent_samples=recent_for_stop,
-            cur_pos_m=cur_pos_m,
-            end_poi_pos_m=end_poi_pos_m,
-            gc_to_kp=gc_to_kp,
-            cfg=self.cfg,
-        )   
-
-        notification_type = infer_notification_type(
-            pig_event=pig_event,
-            poi_passed=poi_passed,
-            next_poi=next_poi,
-            eta_to_next_sec=eta_to_next_sec,
-            now=effective_now,
-            state=state,
-        )
-        self.repo.save_state(pig_id, state)
-        print(f'[DEBUG] state AFTER for {pig_id}: {state}')
 
 
         return {
-            "Pig ID": pig_id,
-            "Tool Type": tool_type,
-            "Now": effective_now.isoformat(),
-            "Sample_time": cur.dt.isoformat(),
-            "Position m:": cur_pos_m,
-            "Speed mps:": speed_mps,
-            "Legacy Route": route,
-            "Previous POI": prev_poi.tag if prev_poi else None,
-            "Next POI": next_poi.tag if next_poi else None,
-            "End POI": end_poi.tag if end_poi else None,
-            "ETA to Next POI (sec)": eta_to_next_sec,
-            "ETA to End POI (sec)": eta_to_end_sec,
-            "Near Next POI": near_next_poi,
-            "Passed Next POI": poi_passed,
-            "Pig Event": pig_event,
-            "Notification Type": notification_type,
+            # "Pig ID": pig_id,
+            # "Tool Type": tool_type,
+            # "Now": effective_now.isoformat(),
+            # "Sample_time": cur.dt.isoformat(),
+            # "Position m:": cur_pos_m,
+            # "Speed mps:": speed_mps,
+            # "Legacy Route": route,
+            # "Previous POI": prev_poi.tag if prev_poi else None,
+            # "Next POI": next_poi.tag if next_poi else None,
+            # "End POI": end_poi.tag if end_poi else None,
+            # "ETA to Next POI (sec)": eta_to_next_sec,
+            # "ETA to End POI (sec)": eta_to_end_sec,
+            # "Near Next POI": near_next_poi,
+            # "Passed Next POI": poi_passed,
+            # "Pig Event": pig_event,
+            # "Notification Type": notification_type,
         }
         
 
-def pos_m(
-        sample: PosSample,
-        gc_to_kp: Dict[int, float],
-        meters_per_channel: float,
-    ) -> Optional[float]:
+def _pos_m(self, sample: PosSample) -> Optional[float]:
+    """Convert a PosSample to position in meters.
+    Priority:
+    1. If KP is provided -> meters = KP * 1000
+    2. Else if GC is provided and mapping exists in GC-to-KP map -> meters = mapped KP * 1000
+    3. Else if GC is provided but no mapping -> meters = GC * (meters_per_channel)
+    4. Else -> None
+    """
 
     if sample.kp is not None:
         return float(sample.kp) * 1000.0
     
-    if sample.gc is None:
-        return None
+    if sample.gc is not None:
+        kp = self._kp_from_gc(int(sample.gc))
+        if kp is not None:
+            return float(kp) * 1000.0
+        return float(sample.gc) * float(self.cfg.meters_per_channel)
     
-    if sample.gc in gc_to_kp:
-        return float(gc_to_kp[sample.gc]) * 1000.0
-    
-    return float(sample.gc) * float(meters_per_channel)
+    return None
 
 def pick_current_sample(samples: List[PosSample]) -> Optional[PosSample]:
     if not samples:
@@ -213,8 +489,8 @@ def pick_ref_sample_at_or_before(samples: List[PosSample],target_dt: datetime) -
 
 def speed_mps_by_ref(cur: PosSample, ref: PosSample, gc_to_kp: Dict[int, float], meters_per_channel: float, speed_min_mps:float,) -> Optional[float]:
     
-    cur_m = pos_m(cur, gc_to_kp, meters_per_channel)
-    ref_m = pos_m(ref, gc_to_kp, meters_per_channel)
+    cur_m = _pos_m(cur, gc_to_kp, meters_per_channel)
+    ref_m = _pos_m(ref, gc_to_kp, meters_per_channel)
 
     if cur_m is None or ref_m is None:
         return None
@@ -231,20 +507,7 @@ def speed_mps_by_ref(cur: PosSample, ref: PosSample, gc_to_kp: Dict[int, float],
     
     return speed
 
-def build_routes(pois: List[POI]) -> Dict[str, List[POI]]:
-    routes: Dict[str, List[POI]] = {}
-
-    for p in pois:
-        r = p.legacy_route
-        if r not in routes:
-            routes[r] = []
-        routes[r].append(p)
-
-    for r, items in routes.items():
-        items.sort(key=lambda x: (x.kp if x.kp is not None else float('inf'),
-                                  x.global_channel if x.global_channel is not None else 10**12))
-        
-    return routes
+    
 
 def route_range_m(route_pois: List[POI], gc_to_kp: Dict[int, float], meters_per_channel: float) -> Optional[Tuple[float, float]]:
     
@@ -253,7 +516,7 @@ def route_range_m(route_pois: List[POI], gc_to_kp: Dict[int, float], meters_per_
 
     for p in route_pois:
         fake_sample = PosSample(dt=datetime.now(), gc=p.global_channel, kp=p.kp)
-        m = pos_m(fake_sample, gc_to_kp, meters_per_channel)
+        m = _pos_m(fake_sample)
         if m is None:
             continue
         if min_m is None or m < min_m:
@@ -266,40 +529,6 @@ def route_range_m(route_pois: List[POI], gc_to_kp: Dict[int, float], meters_per_
     
     return (min_m, max_m)
 
-def pick_legacy_route(
-        state: PigState,
-        routes: Dict[str, List[POI]],
-        cur_pos_m: Optional[float],
-        gc_to_kp: Dict[int, float],
-        meters_per_channel: float,
-        ) -> Optional[str]:
-    
-    if state.locked_legacy_route is not None:
-        if state.locked_legacy_route in routes:
-            return state.locked_legacy_route
-        
-    if cur_pos_m is None:
-        return None
-    
-    best_route: Optional[str] = None
-    best_score: Optional[float] = None
-
-    for r, r_pois in routes.items():
-        rr = route_range_m(r_pois, gc_to_kp, meters_per_channel)
-        if rr is None:
-            continue
-        r_min, r_max = rr
-        if not (r_min <= cur_pos_m <= r_max):
-            continue
-
-        center = (r_min + r_max) / 2.0
-        score = abs(cur_pos_m - center)
-
-        if best_score is None or score < best_score:
-            best_score = score
-            best_route = r
-        
-    return best_route
     
 def find_prev_next_end_poi(
         route_pois: List[POI],
@@ -320,7 +549,7 @@ def find_prev_next_end_poi(
 
     for p in route_pois:
         fake = PosSample(dt=datetime.now(), gc=p.global_channel, kp=p.kp)
-        pm = pos_m(fake, gc_to_kp, meters_per_channel)
+        pm = _pos_m(fake)
         if pm is None:
             continue
 
@@ -366,7 +595,7 @@ def distance_to_poi_m(
         dt=datetime.now(),
         gc=poi.global_channel,
         kp=poi.kp)
-    poi_pos_m = pos_m(fake, gc_to_kp, meters_per_channel)
+    poi_pos_m = _pos_m(fake)
     if poi_pos_m is None:
         return None
     return poi_pos_m - cur_pos_m
@@ -398,91 +627,6 @@ def is_passed_poi(
 
   return was_ahead and now_behind
 
-def infer_moving_or_stopped(
-        recent_samples: List[PosSample],
-        gc_to_kp: Dict[int, float],
-        meters_per_channel: float,
-        stop_max_move_meters: float,
-) -> str:
-    
-    if len(recent_samples) < 2:
-        return PIG_EVENT_NOT_DETECTED
-    
-    positions = []
 
-    for s in recent_samples:
-        m = pos_m(s, gc_to_kp, meters_per_channel)
-        if m is not None:
-            positions.append((s.dt, m))
-    
-    if len(positions) < 2:
-        return PIG_EVENT_NOT_DETECTED
-    
-    min_m = min(positions)
-    max_m = max(positions)
 
-    if max_m - min_m <= stop_max_move_meters:
-        return PIG_EVENT_STOPPED
-    
-    return PIG_EVENT_MOVING
-
-def infer_completed(
-    cur_pos_m: Optional[float],
-    end_poi_pos_m: Optional[float],
-    tol_m: float,
-) -> bool:
-    
-    if cur_pos_m is None or end_poi_pos_m is None:
-        return False
-    
-    return abs(cur_pos_m - end_poi_pos_m) <= tol_m
-
-def infer_pig_event(
-        recent_samples: List[PosSample],
-        cur_pos_m: Optional[float],
-        end_poi_pos_m: Optional[float],
-        gc_to_kp: Dict[int, float],
-        cfg: EngineConfig,
-) -> str:
-
-    if not recent_samples:
-        return PIG_EVENT_NOT_DETECTED
-
-    if infer_completed(cur_pos_m, end_poi_pos_m, cfg.poi_tol_meters):
-        return PIG_EVENT_COMPLETED
-
-    return infer_moving_or_stopped(recent_samples, gc_to_kp, cfg.meters_per_channel, cfg.stop_max_move_meters)
-
-def infer_notification_type(
-        *,
-        pig_event: str,
-        poi_passed: bool,
-        next_poi: Optional[POI],
-        eta_to_next_sec: Optional[float],
-        now: datetime,
-        state: PigState,
-) -> str:
-    
-    if pig_event == PIG_EVENT_COMPLETED:
-        return NOTIF_RUN_COMPLETION
-    if poi_passed:
-        return NOTIF_POI_PASSAGE
-    if state.fired_pre30_for_tag != next_poi.tag:
-        state.fired_pre30_for_tag = next_poi.tag
-        return NOTIF_PRE_30
-    if state.fired_pre15_for_tag != next_poi.tag:
-        state.fired_pre15_for_tag = next_poi.tag
-        return NOTIF_PRE_15
-    if state.first_notif_at in None:
-        state.first_notif_at = now
-        state.last_notif_at = now
-        return NOTIF_30_MIN_UPDATE
-    
-    if state.last_notif_at is not None:
-        delta = (now - state.last_notif_at).total_seconds()
-        if delta >= 30 * 60:
-            state.last_notif_at = now
-            return NOTIF_30_MIN_UPDATE
-    
-    return NOTIF_NONE
 
