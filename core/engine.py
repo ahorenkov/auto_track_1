@@ -374,15 +374,20 @@ class Engine:
         route = routes.get(legacy, [])
         prev_poi, next_poi, end_poi = find_prev_next_end(route, cur, gc_to_kp, cfg)
 
-        pig_event = infer_pig_event(recent, end_poi, gc_to_kp, cfg)
+        raw_event = infer_pig_event(recent, end_poi, gc_to_kp, cfg)
+        pig_event = raw_event
 
         # Variant A: transitions (Stopped -> Moving)
         prev_event = state.last_event
         if prev_event == "Stopped" and pig_event == "Moving":
+            pig_event = "Resumption"
             state.moving_started_at = cur.dt
+        elif raw_event == "Moving":
+            pig_event = "Moving"
+            
         if pig_event in ("Stopped", "Completed"):
             state.moving_started_at = None
-        state.last_event = pig_event
+        state.last_event = raw_event
         state.last_event_dt = cur.dt
 
         # Re-pick route with real event
