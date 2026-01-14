@@ -45,3 +45,8 @@ class PigState:
     last_event_dt: Optional[datetime] = None
     moving_started_at: Optional[datetime] = None
 
+    # Gap dedup
+    last_gap_fired: Optional[str] = None 
+    
+
+

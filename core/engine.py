@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
-from core.models import PigState, PosSample, PigState, POI
+from core.models import PigState, PosSample, PigState, POI, GapPoint
 from core.repo import CsvRepo
 
 
@@ -10,6 +10,9 @@ NOTIF_POI_PASSAGE = "POI Passage"
 NOTIF_PRE_15 = "15 Min Notification"
 NOTIF_PRE_30 = "30 Min Notification"
 NOTIF_30MIN_UPDATE = "30 Min Update"
+
+NOTIF_GAP_START = "Gap Start"
+NOTIF_GAP_END = "Gap End"
 
 
 @dataclass
@@ -319,7 +322,113 @@ class Engine:
                 return NOTIF_PRE_15
             
         return ""
+    
+    def _reset_on_completion(self, state: PigState) -> None:
+        """When PIG copletes a run, reset sticky route and pre-POI dedup"""
+        state.locked_legacy_route = None
+        state.fired_pre15_for_tag = None
+        state.fired_pre30_for_tag = None
+        state.moving_started_at = None
+        state.last_gap_fired = None
 
+    def _build_gaps_by_route(self, gaps: List[GapPoint]) -> Dict[str, List[GapPoint]]:
+        """ Group GapPoints by legacy route and sort by postision(KP preffered)."""
+
+        by_route: Dict[str, List[GapPoint]] = {}
+
+        for g in gaps:
+            by_route.setdefault(g.legacy_route, []).append(g)
+
+        for r in by_route:
+            by_route[r].sort(key=lambda x: float(x.kp))
+
+        return by_route
+    
+
+    def _gap_pos_m(seld, kp: float) -> float:
+        """Convert GapPoint KP to position in meters."""
+        return float(kp) * 1000.0
+    
+    def _infer_gap_notification(self, state: PigState, route_name: str, cur_pos_m: float) -> str:
+        """Decide gap bounary notification if we are close to a gap point.
+        Uses state.last_gap_fired for deduplication."""
+
+        gaps = self.repo.get_gaps()
+        if not gaps:
+            return ""
+
+        by_route = self._build_gaps_by_route(gaps)
+        route_gaps = by_route.get(route_name, [])
+        if not route_gaps:
+            return ""
+        
+        tol = float(self.cfg.poi_tol_meters)
+
+        # find the closest gap point within tolerance
+        best_key: Optional[str] = None
+        best_kind: Optional[str] = None
+        best_abs: Optional[float] = None
+
+        for g in route_gaps:
+            gm = self._gap_pos_m(g.kp)
+            d = abs(cur_pos_m - gm)
+            if d <= tol:
+                key = f'{route_name}:{g.kind}:{g.kp}'
+                if best_abs is None or d < best_abs:
+                    best_abs = d
+                    best_key = key
+                    best_kind = g.kind
+        if best_key is None or best_kind is None:
+            return ""
+        
+        # deduplication
+        if state.last_gap_fired == best_key:
+            return ""
+        
+        state.last_gap_fired = best_key
+        if best_kind == 'start':
+            return NOTIF_GAP_START
+        elif best_kind == 'end':
+            return NOTIF_GAP_END
+        
+        return ""
+    
+    def _build_payload(
+            self,
+            pig_id: str,
+            tool_type: str,
+            route_name: str,
+            cur: PosSample,
+            cur_pos_m: Optional[float],
+            prev_poi: Optional[POI],
+            next_poi: Optional[POI],
+            end_poi: Optional[POI],
+            pig_event: str,
+            speed_mps: Optional[float],
+            eta_next: Optional[int],
+            eta_end: Optional[int],
+            notification_type: str,
+            notif_poi: Optional[POI],
+    ) -> dict:
+        """Build final output dict (payload)"""
+
+        return {
+            "Pig ID": pig_id,
+            "Tool Type": tool_type,
+            "Legacy Route": route_name,
+            "Position m:": round(cur_pos_m, 1) if cur_pos_m is not None else None,
+            "Prev POI": prev_poi.tag if prev_poi else "",
+            "Next POI": next_poi.tag if next_poi else "",  
+            "End POI": end_poi.tag if end_poi else "",
+            "Pig Event": pig_event,
+            "Speed mps:": round(speed_mps, 2) if speed_mps is not None else None,
+            "ETA to Next POI (sec)": eta_next,
+            "ETA to End POI (sec)": eta_end,
+            "Notification Type": notification_type,
+            "Notification Tag": (notif_poi.tag if notif_poi else None),
+            "Notification Valve Type": (notif_poi.valve_type if notif_poi else None),
+        }
+    
 
     def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> dict:
 
@@ -376,27 +485,56 @@ class Engine:
             if end_m is not None:
                 eta_end = self._eta_second(cur_pos_m, end_m, speed_mps)
         
+        notification_type = ""
+        notif_poi: Optional[POI] = None
 
+        # 1. Completion notification
+        if pig_event == "Completed":
+            notification_type = NOTIF_COMPLETION
+            self._reset_on_completion(state)
+
+        else:
+            # 2. POI passage notification
+            passed = self._find_poi_passage(route_pois, cur_pos_m)
+            if passed is not None:
+                notification_type = NOTIF_POI_PASSAGE
+                notif_poi = passed
+            else:
+                # 3. Gap boundary notification
+                gap_notif = self._infer_gap_notification(state, route_name, cur_pos_m)
+                if gap_notif:
+                    notification_type = gap_notif
+                else:
+                    # 4. Pre-POI notification
+                    pre = self._infer_pre_poi_notification(state, next_poi, eta_next)
+                    if pre:
+                        notification_type = pre
+                    else:
+                        # 5. 30-min update notification
+                        if self._infer_30min_update(state, cur.dt):
+                            notification_type = NOTIF_30MIN_UPDATE
 
 
         self.repo.save_state(pig_id, state)
 
 
 
-        return {
-            "Pig ID": pig_id,
-            "Tool Type": tool_type,
-            "Legacy Route": route_name,
-            "Position m:": round(cur_pos_m, 1),
-            "Prev POI": prev_poi.tag if prev_poi else "",
-            "Next POI": next_poi.tag if next_poi else "",  
-            "End POI": end_poi.tag if end_poi else "",
-            "Notification Type": "",
-            "Pig Event": pig_event,
-            "Speed mps:": round(speed_mps, 2) if speed_mps is not None else None,
-            "ETA to Next POI (sec)": eta_next,
-            "ETA to End POI (sec)": eta_end,
-        }
+        return self._build_payload(
+            pig_id=pig_id,
+            tool_type=tool_type,
+            route_name=route_name,
+            cur=cur,
+            cur_pos_m=cur_pos_m,
+            prev_poi=prev_poi,
+            next_poi=next_poi,
+            end_poi=end_poi,
+            pig_event=pig_event,
+            speed_mps=speed_mps,
+            eta_next=eta_next,
+            eta_end=eta_end,
+            notification_type=notification_type,
+            notif_poi=notif_poi,
+        )
     
     
 
