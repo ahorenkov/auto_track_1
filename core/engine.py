@@ -211,6 +211,7 @@ def infer_pig_event(
         return "Not Detected"
 
     span = max(vals) - min(vals)
+    
     return "Stopped" if span <= cfg.poi_tol_meters else "Moving"
 
 
