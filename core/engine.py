@@ -211,7 +211,7 @@ def infer_pig_event(
         return "Not Detected"
 
     span = max(vals) - min(vals)
-    
+
     return "Stopped" if span <= cfg.poi_tol_meters else "Moving"
 
 
@@ -371,7 +371,7 @@ class Engine:
             )
 
         # Route pick (sticky)
-        legacy = pick_legacy_route(state, routes, cur, gc_to_kp, cfg, pig_event="Moving")
+        legacy = pick_legacy_route(state, routes, cur, gc_to_kp, cfg, pig_event="Moving") # Not real "Moving" event
         route = routes.get(legacy, [])
         prev_poi, next_poi, end_poi = find_prev_next_end(route, cur, gc_to_kp, cfg)
 
