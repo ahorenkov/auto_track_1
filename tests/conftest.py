@@ -16,7 +16,7 @@ MST = timezone(timedelta(hours=-7), name="MST")
 
 
 
-def dt(hh: int, mm: int, ss: int, *, day: int = 14, month: int = 1, year: int = 2026) -> datetime:
+def dt(hh: int, mm: int, ss: int = 0, *, day: int = 14, month: int = 1, year: int = 2026) -> datetime:
     return datetime(year, month, day, hh, mm, ss, tzinfo=MST)
 
 def import_engine_models():

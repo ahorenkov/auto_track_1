@@ -65,7 +65,7 @@ def test_infer_pig_event_stopped_when_span_within_tol():
     # span = 0.020, 20m (<= 50 tol meters) => stopped
     recent = _samples_kp(
         base,
-        kps=[10.000, 10.010, 10, 10.020],
+        kps=[10.000, 10.010, 10.020],
         offset_sec=[-240, -120, 0],
     )
     event = infer_pig_event(
@@ -146,7 +146,7 @@ def test_notif_type_run_completion_has_top_priority():
     cfg = _cfg()
     state = PigState()
     gc_to_kp = {}
-    cur = PosSample(dt=dt(8, 0), kp=10.0)
+    cur = PosSample(dt=dt(hh=8, mm=0), kp=10.0)
 
     notif = infer_notification_type(
         state=state,
@@ -167,9 +167,10 @@ def test_notif_type_poi_passage_before_gap_and_updates():
     cfg = _cfg()
     state = PigState()
     gc_to_kp = {}
-    cur = PosSample(dt=dt(8, 0), kp=10.0)
 
-    route = [_poi("V1", 9.0), _poi("V2", 11.0)]
+    cur = PosSample(dt=dt(hh=8, mm=0), kp=10.0)
+    route = [_poi("V1", 10.0), _poi("V2", 11.0)]
+
     notif = infer_notification_type(
         state=state,
         pig_event="Moving",
@@ -178,9 +179,189 @@ def test_notif_type_poi_passage_before_gap_and_updates():
         route=route,
         next_poi=route[1],
         end_poi=route[-1],
-        gaps=[GapPoint(legacy_route="L1", kind="start", kp=10.0)],
+        gaps=[GapPoint(legacy_route="L1", kind="start", kp=99.0)],
         eta_next=None,
         gc_to_kp=gc_to_kp,
         cfg=cfg,
     )
     assert notif == "POI Passage"
+
+def test_notif_type_gap_start_end():
+    cfg = _cfg()
+    state = PigState()
+    gc_to_kp = {}
+    cur = PosSample(dt=dt(hh=8, mm=0), kp=10.0)
+
+    notif = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=[_poi("V1", 9.0), _poi("V2", 11.0)],
+        next_poi=_poi("V2", 11.0),
+        end_poi=_poi("V2", 11.0),
+        gaps=[GapPoint(legacy_route="L1", kind="start", kp=10.0)],
+        eta_next=None,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif == "Gap Start"
+
+def test_notif_type_pre15_fires_ones_per_next_tag():
+    cfg = _cfg()
+    state = PigState()
+    gc_to_kp = {}
+
+    cur_dt = dt(hh=8, mm=0)
+    cur = PosSample(dt=cur_dt, kp=10.0)
+    
+    next_poi = _poi("NEXT", kp=10.5)
+    eta_next = cur_dt + timedelta(minutes=15) # t15 = now
+
+    route = [_poi("FAR1", kp=1.0), next_poi]
+    end_poi = _poi("END_FAR", kp=99.0)
+
+    # 1st time => fires
+    notif1 = infer_notification_type(
+        state = state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=route,
+        next_poi=next_poi,
+        end_poi=end_poi,
+        gaps=[],
+        eta_next=eta_next,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif1 == "15 Min Upstream - Station"
+
+    notif2 = infer_notification_type(
+        state = state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=route,
+        next_poi=next_poi,
+        end_poi=end_poi,
+        gaps=[],
+        eta_next=eta_next,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )   
+    assert notif2 == "30 Min Update"
+
+def test_notif_type_pre30_fires_within_window_and_dedups():
+    cfg = _cfg()
+    state = PigState()
+    gc_to_kp = {}
+
+    # get into +/- 60 sec windown around t30
+    cur_dt = dt(hh=8, mm=0, ss=30)
+    cur = PosSample(dt=cur_dt, kp=10.0)
+
+    next_poi = _poi("NEXT", kp=10.5)
+
+    # eta next - 30 min - t30. t30  = now
+    eta_next = cur_dt + timedelta(minutes=30)
+
+    route = [_poi("FAR1", kp=1.0), next_poi]
+    end_poi = _poi("END_FAR", kp=99.0)
+
+    notif1 = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=route,
+        next_poi=next_poi,
+        end_poi=end_poi,
+        gaps=[],
+        eta_next=eta_next,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif1 == "30 Min Upstream - Station"
+
+    # 2nd time => suppressed
+    notif2 = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=route,
+        next_poi=next_poi,
+        end_poi=end_poi,
+        gaps=[],
+        eta_next=eta_next,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )   
+    assert notif2 == "30 Min Update"
+
+def test_notif_type_30min_update_first_time_sets_state():
+    cfg = _cfg()
+    state = PigState()
+    gc_to_kp = {}
+    cur_dt = dt(hh=8, mm=0)
+    cur = PosSample(dt=cur_dt, kp=10.0)
+
+    notif = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur,
+        legacy_route="L1",
+        route=[_poi("V1", 9.0), _poi("V2", 11.0)],
+        next_poi=_poi("V2", 11.0),
+        end_poi=_poi("V2", 11.0),
+        gaps=[],
+        eta_next=None,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif == "30 Min Update"
+    assert state.first_notif_at == cur_dt
+    assert state.last_notif_at == cur_dt
+
+def test_notif_type_30_min_update_after_30_minutes():
+    cfg = _cfg()
+    gc_to_kp = {}
+
+    base = dt(hh=8, mm=0)
+    state = PigState(first_notif_at=base, last_notif_at=base)
+    
+    # after 29 minutes => empty
+
+    cur1 = PosSample(dt=base + timedelta(minutes=29), kp=10.0)
+    notif1 = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur1,
+        legacy_route="L1",
+        route=[_poi("V1", 9.0), _poi("V2", 11.0)],
+        next_poi=_poi("V2", 11.0),
+        end_poi=_poi("V2", 11.0),
+        gaps=[],
+        eta_next=None,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif1 == ""
+    # after 30 minutes => fires
+    cur2 = PosSample(dt=base + timedelta(minutes=30), kp=10.0)
+    notif2 = infer_notification_type(
+        state=state,
+        pig_event="Moving",
+        cur=cur2,
+        legacy_route="L1",
+        route=[_poi("V1", 9.0), _poi("V2", 11.0)],
+        next_poi=_poi("V2", 11.0),
+        end_poi=_poi("V2", 11.0),
+        gaps=[],
+        eta_next=None,
+        gc_to_kp=gc_to_kp,
+        cfg=cfg,
+    )
+    assert notif2 == "30 Min Update"
+    assert state.last_notif_at == cur2.dt
