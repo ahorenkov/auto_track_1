@@ -337,12 +337,20 @@ class Engine:
         self.repo = repo
         self.cfg = cfg or EngineConfig()
 
+        # Load once at startup
+        self._gc_to_kp = self.repo.get_gc_to_kp()
+        self._pois = self.repo.get_pois()
+        self._gaps = self.repo.get_gaps()
+        self._routes = _build_routes(self._pois)
+        
+
+
     def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> Dict[str, Any]:
         cfg = self.cfg
-        gc_to_kp = self.repo.get_gc_to_kp()
-        pois = self.repo.get_pois()
-        gaps = self.repo.get_gaps()
-        routes = _build_routes(pois)
+        # use cache metadata
+        gc_to_kp = self._gc_to_kp
+        gaps = self._gaps
+        routes = self._routes
 
         state = self.repo.get_state(pig_id)
 
