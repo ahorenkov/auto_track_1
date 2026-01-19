@@ -3,10 +3,14 @@ from __future__ import annotations
 import csv
 import os
 from datetime import datetime
-from typing import Dict, List, Protocol
+from typing import Dict, List, Protocol, Optional
+from dataclasses import asdict
 
+from core import state
 from core.models import POI, GapPoint, PosSample, PigState
 from core.state import InMemoryStateStore
+import psycopg
+import json
 
 
 class TelemetryRepo(Protocol):
@@ -150,27 +154,62 @@ class CsvRepo:
 
 
 class PostgresRepo:
-    """Stub for future implementation (psycopg/asyncpg/SQLAlchemy).
-    Must implement TelemetryRepo."""
-
-    def __init__(self, dsn: str) -> None:
+    
+    def __init__(self, dsn: str, root_dir: str=".") -> None:
         self.dsn = dsn
-        raise NotImplementedError("PostgresRepo not implemented yet")
+        self._csv = CsvRepo(root_dir=root_dir)
 
     def get_gc_to_kp(self) -> Dict[int, float]:
-        raise NotImplementedError
+        return self._csv.get_gc_to_kp()
 
     def get_pois(self) -> List[POI]:
-        raise NotImplementedError
-
+        return self._csv.get_pois()
+    
     def get_gaps(self) -> List[GapPoint]:
-        raise NotImplementedError
-
+        return self._csv.get_gaps()
+    
     def get_recent_positions(self, pig_id: str, since_dt: datetime) -> List[PosSample]:
-        raise NotImplementedError
+        sql = """
+        SELECT ts, gc, kp
+        FROM pig_positions
+        WHERE pig_id = %s AND ts >= %s
+        ORDER BY ts ASC
+        """
+        out: List[PosSample] = []
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (pig_id, since_dt))
+                rows = cur.fetchall()
+                for ts, gc, kp in rows:
+                    out.append(PosSample(dt=ts, gc=gc, kp=kp))
+        return out
 
     def get_state(self, pig_id: str) -> PigState:
-        raise NotImplementedError
+        sql = "SELECT state_json FROM pig_state WHERE pig_id = %s"
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (pig_id,))
+                row = cur.fetchone()
+        if not row:
+            return PigState()
+        
+        data = row[0]
+        st = PigState()
+        for k, v in data.items():
+            if hasattr(st, k):
+                setattr(st, k, v)
+        return st
+
 
     def save_state(self, pig_id: str, state: PigState) -> None:
-        raise NotImplementedError
+        sql = """
+        INSERT INTO pig_state (pig_id, state_json, updated_at)
+        VALUES (%s, %s::jsonb, NOW())
+        ON CONFLICT (pig_id) 
+        DO UPDATE set state_json = EXCLUDED.state_json, updated_at = NOW()
+        """
+        payload = json.dumps(asdict(state), default=str)
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (pig_id, payload))
+            conn.commit()
