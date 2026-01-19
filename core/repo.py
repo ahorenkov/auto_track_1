@@ -87,7 +87,7 @@ class CsvRepo:
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
                 gc_s = _pick(row, ["Global Channel", "GC"])
-                kp_s = _pick(row, ["KP", "kp"])
+                kp_s = _pick(row, ["KP", "matched_kp", "kp"])
                 if not gc_s or not kp_s:
                     continue
                 try:
@@ -106,10 +106,11 @@ class CsvRepo:
                 tag = _pick(row, ["Valve Tag", "Tag"])
                 if not tag:
                     continue
-                legacy = _pick(row, ["Legacy Route Name", "Legacy Route", "Legacy"]) or "Unknown"
+                legacy_row = _pick(row, ["Legacy Route Name", "Legacy Route", "Legacy"]) or "Unknown"
+                legacy = _norm_legacy(legacy_row)
                 vt = _pick(row, ["Valve Type", "Type"])
                 gc_s = _pick(row, ["Global Channel", "GC"])
-                kp_s = _pick(row, ["matched_kp", "KP", "kp"])
+                kp_s = _pick(row, ["KP", "matched_kp", "kp"])
 
                 gc = None
                 kp = None
@@ -135,7 +136,8 @@ class CsvRepo:
         out: List[GapPoint] = []
         with open(path, "r", newline="", encoding="utf-8-sig") as f:
             for row in csv.DictReader(f):
-                legacy = _pick(row, ["Legacy Route Name", "Legacy Route", "legacy_route", "route"]) or "Unknown"
+                legacy_row = _pick(row, ["Legacy Route Name", "Legacy Route", "legacy_route", "route"]) or "Unknown"
+                legacy = _norm_legacy(legacy_row)
                 kind_raw = _pick(row, ["Gap", "Gap Type", "gap", "kind"]).strip().lower()
                 kp_s = _pick(row, ["KP", "kp"])
                 if not kp_s:
@@ -195,8 +197,12 @@ class PostgresRepo:
         
         data = row[0]
         st = PigState()
-        for k, v in data.items():
-            if hasattr(st, k):
+        for k, v in (data or {}).items():
+            if not hasattr(st, k):
+                continue
+            if k.endswith("_at") and v is not None:
+                setattr(st, k, _parse_dt(v))
+            else:
                 setattr(st, k, v)
         return st
 
@@ -213,3 +219,11 @@ class PostgresRepo:
             with conn.cursor() as cur:
                 cur.execute(sql, (pig_id, payload))
             conn.commit()
+
+def _parse_dt(v):
+    if isinstance(v, str):
+        return datetime.fromisoformat(v)
+    return v
+
+def _norm_legacy(s: str) -> str:
+    return (s or "").strip().casefold() or "unknown"
