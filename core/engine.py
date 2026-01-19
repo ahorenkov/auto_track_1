@@ -125,7 +125,7 @@ def pick_legacy_route(
     pig_event: str,
 ) -> str:
     """Sticky legacy route until Completed."""
-    if state.locked_legacy_route and pig_event != "Completed":
+    if state.locked_legacy_route and state.locked_legacy_route != "Unknown" and pig_event != "Completed":
         return state.locked_legacy_route
 
     cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
@@ -157,7 +157,7 @@ def pick_legacy_route_by_nearest_poi(
     pig_event: str,
 ) -> str:
     # sticky until Completed
-    if state.locked_legacy_route and pig_event != "Completed":
+    if state.locked_legacy_route and state.locked_legacy_route != "Unknown" and pig_event != "Completed":
         return state.locked_legacy_route
 
     cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
@@ -359,6 +359,8 @@ def build_payload(
     eta_end: Optional[datetime],
     legacy_route: str,
     current_gc: Optional[int],
+    current_kp: Optional[float],
+    time: datetime,
 ) -> Dict[str, Any]:
     return {
         "Pig ID": pig_id,
@@ -374,6 +376,8 @@ def build_payload(
         "ETA to the End": eta_end.strftime("%d-%m-%y %H%M%S") if eta_end else "",
         "Legacy Route": legacy_route,
         "Current Global Channel": str(current_gc) if current_gc is not None else "",
+        "Current KP": f"{current_kp:.3f}" if current_kp is not None else "",
+        "Timestamp": time.strftime("%d-%m-%y %H%M%S"),
     }
 
 def pick_legacy_route_smart(
@@ -453,6 +457,8 @@ class Engine:
                 eta_end=None,
                 legacy_route=state.locked_legacy_route or "Unknown",
                 current_gc=None,
+                current_kp=None,
+                time=now,
             )
 
         # Route pick (sticky)
@@ -570,4 +576,6 @@ class Engine:
             eta_end=eta_end,
             legacy_route=legacy,
             current_gc=cur.gc,
+            current_kp=cur.kp,
+            time=cur.dt,
         )

@@ -30,7 +30,7 @@ def seed(repo_dsn: str, pig_id: str, now: datetime) -> None:
 def main() -> None:
     dsn = "postgresql://auto:auto@localhost:5432/auto"
     repo = PostgresRepo(dsn=dsn, root_dir=".")
-    pig_id = "PIG_002"
+    pig_id = "PIG_004"
     tool_type = ""
     now = datetime(2025, 12, 23, 8, 10, 0, tzinfo=MST)
     seed(dsn, pig_id, now)

@@ -219,6 +219,42 @@ class PostgresRepo:
             with conn.cursor() as cur:
                 cur.execute(sql, (pig_id, payload))
             conn.commit()
+            
+    def list_active_pigs(self, since_dt: datetime) -> List[str]:
+        sql = """
+        SELECT DISTINCT pig_id
+        FROM pig_positions
+        WHERE ts >= %s
+        ORDER BY pig_id ASC
+        """
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (since_dt,))
+                rows = cur.fetchall()
+
+        return [row[0] for row in rows]
+    
+    def enqueue_notification(
+            self,
+            dedup_key: str,
+            pig_id: str,
+            notif_type: str,
+            payload: Dict[str, any],
+        ) -> None:
+        sql = """
+        INSERT INTO notifications_outbox (dedup_key, pig_id, notif_type, payload)
+        VALUES (%s, %s, %s, %s::jsonb)
+        ON CONFLICT (dedup_key) DO NOTHING
+        returning id
+        """
+        payload_json = json.dumps(payload, default=str)
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (dedup_key, pig_id, notif_type, payload_json))
+                row = cur.fetchone()
+            conn.commit()
+        return row is not None
+
 
 def _parse_dt(v):
     if isinstance(v, str):
@@ -227,3 +263,14 @@ def _parse_dt(v):
 
 def _norm_legacy(s: str) -> str:
     return (s or "").strip().casefold() or "unknown"
+
+def make_dedup_key(payload: dict) -> str:
+    pig_id = payload.get("Pig ID", "")
+    notif_type = str(payload.get("Notification Type", ""))
+
+    now_s = payload.get("Now")
+    poi = payload.get("Next Valve Tag") or payload.get("Previous Valve Tag")
+
+    subject = poi or ""
+
+    return f"{pig_id}|{notif_type}|{subject}|{now_s}"
