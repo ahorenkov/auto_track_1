@@ -37,6 +37,14 @@ create table if not exists notifications_outbox (
   status text not null default 'NEW',
   attempt_count int not null default 0,
   next_attempt_at timestamptz not null default now(),
+  last_error text,
+  sent_at timestamptz,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 );
+
+alter table notifications_outbox
+  add column if not exists locked_by text,
+  add column if not exists locked_at timestamptz,
+  add column if not exists sent_at timestamptz,
+  add column if not exists last_error text;

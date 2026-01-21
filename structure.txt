@@ -1,0 +1,37 @@
+AUTO_TRACK_1/
+├─ .pytest_cache/
+│
+├─ core/
+│  ├─ __pycache__/
+│  ├─ __init__.py
+│  ├─ engine.py
+│  ├─ models.py
+│  ├─ repo.py
+│  └─ state.py
+│
+├─ db/
+│  └─ migrations/
+│     ├─ 001_init.sql
+│     ├─ 002_notifications_outbox.sql
+│     └─ 003_notifications_audit.sql
+│
+├─ tests/
+│  ├─ __pycache__/
+│  ├─ conftest.py
+│  ├─ test_01_single_pig_basics.py
+│  ├─ test_engine_edge_cases.py
+│  ├─ test_engine_process_pig_scenarios.py
+│  ├─ test_engine_scenarios.py
+│  ├─ test_engine_units_math.py
+│  └─ test_units_engine_events.py
+│
+├─ .gitignore
+├─ cli_demo.py
+├─ detector_worker.py
+├─ docker-compose.yml
+├─ GAP.csv
+├─ GCtoKP.csv
+├─ pg_cli_demo.py
+├─ POI.csv
+├─ README.md
+└─ sender_worker.py
