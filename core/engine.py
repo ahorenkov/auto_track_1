@@ -2,10 +2,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Any, Dict, List, Optional, Tuple
 
-from core.models import PosSample, POI, GapPoint, PigState
+from core.models import GapPoint, POI, PigState, PosSample
 from core.repo import TelemetryRepo
+
+
+UNKNOWN_ROUTE = "Unknown"
 
 
 @dataclass(frozen=True)
@@ -18,8 +21,6 @@ class EngineConfig:
 
     # Pre-POI notification time match: ±60 seconds around ETA-15/ETA-30
     prepoi_time_window_sec: int = 60
-
-    eps_kp: float = 1e-3
 
     # --- Speed/ETA windows ---
     speed_window_sec: int = 1500          # long window: 25 minutes
@@ -42,11 +43,8 @@ def _pos_m(sample: PosSample, gc_to_kp: Dict[int, float], meters_per_channel: in
         return sample.gc * meters_per_channel
     return None
 
-def _poi_pos_m_(
-        poi:POI,
-        gc_to_kp: Dict[int, float],
-        meters_per_channel: int
-    ) -> Optional[float]:
+
+def _poi_pos_m(poi: POI, gc_to_kp: Dict[int, float], meters_per_channel: int) -> Optional[float]:
     if poi.kp is not None:
         return poi.kp * 1000.0
     if poi.global_channel is not None:
@@ -58,7 +56,6 @@ def _poi_pos_m_(
 
 
 def _current_sample(samples: List[PosSample]) -> Optional[PosSample]:
-    """Return the newest sample by dt (or None if empty)."""
     if not samples:
         return None
     return max(samples, key=lambda s: s.dt)
@@ -90,7 +87,7 @@ def speed_mps_by_ref(cur: PosSample, ref: PosSample, gc_to_kp: Dict[int, float],
 def _build_routes(pois: List[POI]) -> Dict[str, List[POI]]:
     routes: Dict[str, List[POI]] = {}
     for p in pois:
-        routes.setdefault(p.legacy_route or "Unknown", []).append(p)
+        routes.setdefault(p.legacy_route or UNKNOWN_ROUTE, []).append(p)
 
     def sort_key(p: POI) -> Tuple[int, float, int, int, str]:
         kp_missing = 1 if p.kp is None else 0
@@ -105,12 +102,11 @@ def _build_routes(pois: List[POI]) -> Dict[str, List[POI]]:
 
 
 def _route_range_m(route: List[POI], gc_to_kp: Dict[int, float], cfg: EngineConfig) -> Tuple[Optional[float], Optional[float]]:
-    vals = []
+    vals: List[float] = []
     for p in route:
-        pm = _poi_pos_m_(p, gc_to_kp, cfg.meters_per_channel)
+        pm = _poi_pos_m(p, gc_to_kp, cfg.meters_per_channel)
         if pm is not None:
             vals.append(pm)
-
     if not vals:
         return (None, None)
     return (min(vals), max(vals))
@@ -124,68 +120,48 @@ def pick_legacy_route(
     cfg: EngineConfig,
     pig_event: str,
 ) -> str:
-    """Sticky legacy route until Completed."""
-    if state.locked_legacy_route and state.locked_legacy_route != "Unknown" and pig_event != "Completed":
-        return state.locked_legacy_route
+    """Simple + reliable:
+    - If locked route exists (and not Unknown) and event not Completed -> use it.
+    - Else choose by range overlap (cur within route min/max ± tol).
+    - If nothing matches -> Unknown (do not lock).
+    - If Completed -> allow re-pick / unlock.
+    """
+    locked = state.locked_legacy_route
+    if locked and locked != UNKNOWN_ROUTE and pig_event != "Completed":
+        # If routes were reloaded and the key disappeared, fall back to Unknown and re-pick.
+        if locked in routes:
+            return locked
+        state.locked_legacy_route = None
 
     cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
     if cur_m is None:
-        return "Unknown"
+        return UNKNOWN_ROUTE
 
     tol_m = float(cfg.poi_tol_meters)
     candidates: List[Tuple[float, str]] = []
 
     for name, route in routes.items():
+        if name == UNKNOWN_ROUTE:
+            continue
         rmin_m, rmax_m = _route_range_m(route, gc_to_kp, cfg)
         if rmin_m is None or rmax_m is None:
             continue
-        if (rmin_m- tol_m) <= cur_m <= (rmax_m + tol_m):
+        if (rmin_m - tol_m) <= cur_m <= (rmax_m + tol_m):
+            # pick the narrowest range as the most specific route
             candidates.append((rmax_m - rmin_m, name))
-            
 
-    picked = min(candidates)[1] if candidates else "Unknown"
-    if picked != "Unknown":
+    picked = min(candidates)[1] if candidates else UNKNOWN_ROUTE
+    if picked != UNKNOWN_ROUTE:
         state.locked_legacy_route = picked
     return picked
 
-def pick_legacy_route_by_nearest_poi(
-    state: PigState,
-    pois: List[POI],
+
+def find_prev_next_end(
+    route: List[POI],
     cur: PosSample,
     gc_to_kp: Dict[int, float],
     cfg: EngineConfig,
-    pig_event: str,
-) -> str:
-    # sticky until Completed
-    if state.locked_legacy_route and state.locked_legacy_route != "Unknown" and pig_event != "Completed":
-        return state.locked_legacy_route
-
-    cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
-    if cur_m is None:
-        return "Unknown"
-
-    best: Optional[Tuple[float, str]] = None  # (distance_m, legacy_route)
-
-    for p in pois:
-        pm = _poi_pos_m_(p, gc_to_kp, cfg.meters_per_channel)
-        if pm is None:
-            continue
-
-        dist = abs(cur_m - pm)
-        if best is None or dist < best[0]:
-            best = (dist, p.legacy_route or "Unknown")
-
-    if best is None:
-        picked = "Unknown"
-    else:
-        picked = best[1]
-
-    if picked != "Unknown":
-        state.locked_legacy_route = picked
-    return picked
-
-
-def find_prev_next_end(route: List[POI], cur: PosSample, gc_to_kp: Dict[int, float], cfg: EngineConfig) -> Tuple[Optional[POI], Optional[POI], Optional[POI]]:
+) -> Tuple[Optional[POI], Optional[POI], Optional[POI]]:
     if not route:
         return (None, None, None)
 
@@ -193,15 +169,14 @@ def find_prev_next_end(route: List[POI], cur: PosSample, gc_to_kp: Dict[int, flo
     if cur_m is None:
         return (None, None, route[-1])
 
-    def poi_m(p: POI) -> Optional[float]:
-        return _poi_pos_m_(p, gc_to_kp, cfg.meters_per_channel)
+    prev: Optional[POI] = None
+    nextp: Optional[POI] = None
 
-    prev = None
-    nextp = None
     for p in route:
-        pm = _poi_pos_m_(p, gc_to_kp, cfg.meters_per_channel)
+        pm = _poi_pos_m(p, gc_to_kp, cfg.meters_per_channel)
         if pm is None:
             continue
+
         if pm < cur_m - cfg.poi_tol_meters:
             prev = p
         elif abs(pm - cur_m) <= cfg.poi_tol_meters:
@@ -209,6 +184,7 @@ def find_prev_next_end(route: List[POI], cur: PosSample, gc_to_kp: Dict[int, flo
         elif pm > cur_m + cfg.poi_tol_meters:
             nextp = p
             break
+
     return (prev, nextp, route[-1])
 
 
@@ -216,14 +192,11 @@ def _is_close_to_poi(cur: PosSample, poi: POI, gc_to_kp: Dict[int, float], cfg: 
     cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
     if cur_m is None:
         return False
-    if poi.kp is not None:
-        trg_m = poi.kp * 1000.0
-    elif poi.global_channel is not None:
-        trg_m = _poi_pos_m_(poi, gc_to_kp, cfg.meters_per_channel)
-        if trg_m is None:
-            return False
-    else:
+
+    trg_m = _poi_pos_m(poi, gc_to_kp, cfg.meters_per_channel)
+    if trg_m is None:
         return False
+
     return abs(cur_m - trg_m) <= cfg.poi_tol_meters
 
 
@@ -254,29 +227,22 @@ def infer_pig_event(
         return "Not Detected"
 
     span = max(vals) - min(vals)
-
     return "Stopped" if span <= cfg.poi_tol_meters else "Moving"
 
 
 def eta_from_to(cur: PosSample, target: POI, speed: float, gc_to_kp: Dict[int, float], cfg: EngineConfig) -> Optional[datetime]:
     if speed <= 0:
         return None
-    cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
-    if cur_m is None:
-        return None
 
-    if target.kp is not None:
-        trg_m = target.kp * 1000.0
-    elif target.global_channel is not None:
-        trg_m = _poi_pos_m_(target, gc_to_kp, cfg.meters_per_channel)
-        if trg_m is None:
-            return None
-    else:
+    cur_m = _pos_m(cur, gc_to_kp, cfg.meters_per_channel)
+    trg_m = _poi_pos_m(target, gc_to_kp, cfg.meters_per_channel)
+    if cur_m is None or trg_m is None:
         return None
 
     dist_m = trg_m - cur_m
     if dist_m < 0:
         return None
+
     return cur.dt + timedelta(seconds=(dist_m / speed))
 
 
@@ -380,35 +346,6 @@ def build_payload(
         "Timestamp": time.strftime("%d-%m-%y %H%M%S"),
     }
 
-def pick_legacy_route_smart(
-        state: PigState,
-        routes: Dict[str, List[POI]],
-        pois: List[POI],
-        cur: PosSample,
-        gc_to_kp: Dict[int, float],
-        cfg: EngineConfig,
-        pig_event: str,
-    ) -> str:
-    legacy = pick_legacy_route(
-        state=state,
-        routes=routes,
-        cur=cur,
-        gc_to_kp=gc_to_kp,
-        cfg=cfg,
-        pig_event=pig_event,
-    )
-    if legacy != "Unknown":
-        return legacy
-    
-    # fallback
-    return pick_legacy_route_by_nearest_poi(
-        state=state,
-        pois=pois,
-        cur=cur,
-        gc_to_kp=gc_to_kp,
-        cfg=cfg,
-        pig_event=pig_event,
-    )
 
 class Engine:
     def __init__(self, repo: TelemetryRepo, cfg: Optional[EngineConfig] = None) -> None:
@@ -420,12 +357,9 @@ class Engine:
         self._pois = self.repo.get_pois()
         self._gaps = self.repo.get_gaps()
         self._routes = _build_routes(self._pois)
-        
-
 
     def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> Dict[str, Any]:
         cfg = self.cfg
-        # use cache metadata
         gc_to_kp = self._gc_to_kp
         gaps = self._gaps
         routes = self._routes
@@ -433,7 +367,7 @@ class Engine:
         state = self.repo.get_state(pig_id)
 
         default_tool_type = "Cleaning Tool"
-        effective_tool = (state.locked_tool_type or (tool_type.strip() if tool_type else "") or default_tool_type)
+        effective_tool = (getattr(state, "locked_tool_type", None) or (tool_type.strip() if tool_type else "") or default_tool_type)
 
         # 1) last 5 minutes -> Moving/Stopped
         since_move = now - timedelta(seconds=cfg.stopped_window_sec)
@@ -455,65 +389,43 @@ class Engine:
                 next_poi=None,
                 eta_next=None,
                 eta_end=None,
-                legacy_route=state.locked_legacy_route or "Unknown",
+                legacy_route=state.locked_legacy_route or UNKNOWN_ROUTE,
                 current_gc=None,
                 current_kp=None,
                 time=now,
             )
 
-        # Route pick (sticky)
-        legacy = pick_legacy_route_smart(
-            state=state, 
-            routes=routes,
-            pois=self._pois,
-            cur=cur,
-            gc_to_kp=gc_to_kp,
-            cfg=cfg, 
-            pig_event="Moving"
-            ) # Not real "Moving" event
+        # --- Legacy route (simple + sticky) ---
+        legacy = pick_legacy_route(state, routes, cur, gc_to_kp, cfg, pig_event="Moving")
         route = routes.get(legacy, [])
-        if legacy == "Unknown":
-            print(f"[WARN] legacy route Unknown; cur_m may be outside all route ranges. cur.gc={cur.gc} cur.kp={cur.kp}")
-
-        if legacy != "Unknown" and not route:
-            print(f"[WARN] legacy '{legacy}' not found in routes (routes keys mismatch?)")
         prev_poi, next_poi, end_poi = find_prev_next_end(route, cur, gc_to_kp, cfg)
 
         raw_event = infer_pig_event(recent, end_poi, gc_to_kp, cfg)
         pig_event = raw_event
 
-        # Variant A: transitions (Stopped -> Moving)
+        # Transition tracking for speed window (Stopped -> Moving)
         prev_event = state.last_event
-        if prev_event == "Stopped" and pig_event == "Moving":
+        if prev_event == "Stopped" and raw_event == "Moving":
             pig_event = "Resumption"
             state.moving_started_at = cur.dt
         elif raw_event == "Moving":
             pig_event = "Moving"
-            
+
         if pig_event in ("Stopped", "Completed"):
             state.moving_started_at = None
+
         state.last_event = raw_event
         state.last_event_dt = cur.dt
 
-        # Re-pick route with real event
-        legacy = pick_legacy_route_smart(
-            state=state,
-            routes=routes,
-            pois=self._pois,
-            cur=cur, 
-            gc_to_kp=gc_to_kp, 
-            cfg=cfg, 
-            pig_event=pig_event)
-        route = routes.get(legacy, [])
-        if legacy == "Unknown":
-            print(f"[WARN] legacy route Unknown; cur_m may be outside all route ranges. cur.gc={cur.gc} cur.kp={cur.kp}")
-
-        if legacy != "Unknown" and not route:
-            print(f"[WARN] legacy '{legacy}' not found in routes (routes keys mismatch?)")
-        prev_poi, next_poi, end_poi = find_prev_next_end(route, cur, gc_to_kp, cfg)
+        # If Completed, allow unlock (and keep legacy as-is for payload)
+        if raw_event == "Completed":
+            state.locked_legacy_route = None
+            state.moving_started_at = None
+            if hasattr(state, "locked_tool_type"):
+                state.locked_tool_type = None
 
         # Speed/ETA
-        if pig_event == "Stopped":
+        if raw_event == "Stopped":
             spd = 0.0
             eta_next = None
             eta_end = None
@@ -535,9 +447,8 @@ class Engine:
             ref = pick_ref_sample_at_or_before(pool, target_dt)
 
             spd = 0.0
-            if ref is not None:
-                if (cur.dt - ref.dt).total_seconds() >= cfg.min_speed_dt_sec:
-                    spd = speed_mps_by_ref(cur, ref, gc_to_kp, cfg)
+            if ref is not None and (cur.dt - ref.dt).total_seconds() >= cfg.min_speed_dt_sec:
+                spd = speed_mps_by_ref(cur, ref, gc_to_kp, cfg)
 
             eta_next = eta_from_to(cur, next_poi, spd, gc_to_kp, cfg) if (next_poi and spd > 0) else None
             eta_end = eta_from_to(cur, end_poi, spd, gc_to_kp, cfg) if (end_poi and spd > 0) else None
@@ -556,12 +467,6 @@ class Engine:
             cfg=cfg,
         )
 
-        if pig_event == "Completed":
-            state.locked_legacy_route = None
-            state.moving_started_at = None
-            state.locked_tool_type = None
-        print("legacy=", legacy, "cur.gc=", cur.gc, "cur.kp=", cur.kp)
-        print("prev=", prev_poi.tag if prev_poi else None, "next=", next_poi.tag if next_poi else None)
         self.repo.save_state(pig_id, state)
 
         return build_payload(
