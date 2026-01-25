@@ -3,7 +3,7 @@ from __future__ import annotations
 import csv
 import os
 from datetime import datetime
-from typing import Dict, List, Protocol, Optional
+from typing import Dict, List, Protocol, Optional, Any
 from dataclasses import asdict
 
 from core import state
@@ -239,8 +239,8 @@ class PostgresRepo:
             dedup_key: str,
             pig_id: str,
             notif_type: str,
-            payload: Dict[str, any],
-        ) -> None:
+            payload: Dict[str, Any],
+        ) -> bool:
         sql = """
         INSERT INTO notifications_outbox (dedup_key, pig_id, notif_type, payload)
         VALUES (%s, %s, %s, %s::jsonb)
@@ -262,15 +262,47 @@ def _parse_dt(v):
     return v
 
 def _norm_legacy(s: str) -> str:
-    return (s or "").strip().casefold() or "unknown"
+    # Keep names consistent with engine expectations ("Unknown").
+    return (s or "").strip() or "Unknown"
 
-def make_dedup_key(payload: dict) -> str:
-    pig_id = payload.get("Pig ID", "")
-    notif_type = str(payload.get("Notification Type", ""))
+def _parse_payload_ts(payload: Dict[str, Any]) -> Optional[datetime]:
+    """Parse payload['Timestamp'] which is formatted as '%d-%m-%y %H%M%S'."""
+    ts_s = (payload.get("Timestamp") or "").strip()
+    if not ts_s:
+        return None
+    try:
+        return datetime.strptime(ts_s, "%d-%m-%y %H%M%S")
+    except Exception:
+        return None
 
-    now_s = payload.get("Now")
-    poi = payload.get("Next Valve Tag") or payload.get("Previous Valve Tag")
 
-    subject = poi or ""
+def make_dedup_key(payload: Dict[str, Any]) -> str:
+    """Build a stable de-duplication key for outbox.
 
-    return f"{pig_id}|{notif_type}|{subject}|{now_s}"
+    Goals:
+    - Periodic updates should dedup within their 30-min bucket.
+    - One-shot notifications should dedup per pig + type + subject (POI tag if present).
+    - Avoid using seconds-level time to prevent duplicates caused by tiny timing shifts.
+    """
+
+    pig_id = str(payload.get("Pig ID", "") or "").strip()
+    notif_type = str(payload.get("Notification Type", "") or "").strip()
+
+    # Subject: prefer POI tag, else route, else empty.
+    subject = (
+        (payload.get("Next Valve Tag") or "").strip()
+        or (payload.get("Previous Valve Tag") or "").strip()
+        or (payload.get("Legacy Route") or "").strip()
+    )
+
+    ts = _parse_payload_ts(payload)
+
+    # 30-min update: bucket into fixed 30-minute windows.
+    if notif_type == "30 Min Update" and ts is not None:
+        bucket_min = (ts.minute // 30) * 30
+        bucket = ts.replace(minute=bucket_min, second=0, microsecond=0)
+        return f"{pig_id}|{notif_type}||{bucket.strftime('%Y-%m-%d %H:%M')}"
+
+    # Other notifications: ignore seconds (minute precision is enough).
+    time_part = ts.strftime("%Y-%m-%d %H:%M") if ts is not None else ""
+    return f"{pig_id}|{notif_type}|{subject}|{time_part}"
