@@ -200,7 +200,7 @@ class PostgresRepo:
         for k, v in (data or {}).items():
             if not hasattr(st, k):
                 continue
-            if k.endswith("_at") and v is not None:
+            if (k.endswith("_at") or k.endswith("_dt")) and v is not None:
                 setattr(st, k, _parse_dt(v))
             else:
                 setattr(st, k, v)
