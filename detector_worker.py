@@ -15,13 +15,15 @@ def run_detector():
     engine = Engine(repo, cfg=EngineConfig())
 
     poll_every_seconds = 10
-    active_lookback_minutes = 60
+    active_lookback_minutes = 60 # 1 hour
 
     while True:
         now = utcnow()
         since = now - timedelta(minutes=active_lookback_minutes)
+        
 
         pig_ids = repo.list_active_pigs(since_dt=since)
+        print(f"[DEBUG] checking for active pigs {pig_ids}")
         for pig_id in pig_ids:
             payload = engine.process_pig(pig_id=pig_id, tool_type="", now=now)
 
@@ -30,6 +32,7 @@ def run_detector():
                 continue
 
             dedup_key = make_dedup_key(payload)
+            print(f"[DEBUG] notif_type='{payload.get('Notification Type')}' pig_event='{payload.get('Pig Event')}'")   
             inserted = repo.enqueue_notification(
                 dedup_key=dedup_key,
                 pig_id=pig_id,

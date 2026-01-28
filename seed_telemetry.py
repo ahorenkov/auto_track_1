@@ -80,3 +80,11 @@ def main() -> None:
 if __name__ == "__main__":
     print("Seeding telemetry data...")
     main()
+
+
+'''
+-- 1. api start
+-- 2. seed telemetry
+-- 3. start detector worker
+-- 4. start sender worker 
+'''
