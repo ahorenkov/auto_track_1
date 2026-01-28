@@ -51,8 +51,8 @@ class CsvRepo:
         self._load_all()
 
     def _load_all(self) -> None:
-        self._gc_to_kp = self._load_gc_to_kp(os.path.join(self.root_dir, "GCtoKP.csv"))
-        self._pois = self._load_pois(os.path.join(self.root_dir, "POI.csv"))
+        self._gc_to_kp = self._load_gc_to_kp(os.path.join(self.root_dir, "gctokp.csv"))
+        self._pois = self._load_pois(os.path.join(self.root_dir, "poi.csv"))
         self._gaps = self._load_gaps(os.path.join(self.root_dir, "gap.csv"))
 
     def get_gc_to_kp(self) -> Dict[int, float]:
@@ -172,7 +172,7 @@ class PostgresRepo:
     
     def get_recent_positions(self, pig_id: str, since_dt: datetime) -> List[PosSample]:
         sql = """
-        SELECT ts, gc, kp
+        SELECT ts, gc, kp, tool_type
         FROM pig_positions
         WHERE pig_id = %s AND ts >= %s
         ORDER BY ts ASC
@@ -182,8 +182,8 @@ class PostgresRepo:
             with conn.cursor() as cur:
                 cur.execute(sql, (pig_id, since_dt))
                 rows = cur.fetchall()
-                for ts, gc, kp in rows:
-                    out.append(PosSample(dt=ts, gc=gc, kp=kp))
+                for ts, gc, kp, tool_type in rows:
+                    out.append(PosSample(dt=ts, gc=gc, kp=kp, tool_type=tool_type))
         return out
 
     def get_state(self, pig_id: str) -> PigState:

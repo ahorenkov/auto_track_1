@@ -3,12 +3,14 @@ import os
 import random
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import List, Sequence, Tuple
 
 import psycopg
 import requests
 
+
+MST = timezone(timedelta(hours=-7), name="MST")
 
 @dataclass
 class OutboxItem:
@@ -21,7 +23,7 @@ class OutboxItem:
 
 
 def utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=MST)
 
 
 def compute_backoff_seconds(attempt_count: int) -> int:

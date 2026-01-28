@@ -11,27 +11,16 @@ AUTO_TRACK_1/
 │
 ├─ db/
 │  └─ migrations/
-│     ├─ 001_init.sql
-│     ├─ 002_notifications_outbox.sql
-│     └─ 003_notifications_audit.sql
-│
-├─ tests/
-│  ├─ __pycache__/
-│  ├─ conftest.py
-│  ├─ test_01_single_pig_basics.py
-│  ├─ test_engine_edge_cases.py
-│  ├─ test_engine_process_pig_scenarios.py
-│  ├─ test_engine_scenarios.py
-│  ├─ test_engine_units_math.py
-│  └─ test_units_engine_events.py
+│     └─001_init.sql    
 │
 ├─ .gitignore
-├─ cli_demo.py
+├─ .env
 ├─ detector_worker.py
 ├─ docker-compose.yml
 ├─ GAP.csv
 ├─ GCtoKP.csv
-├─ pg_cli_demo.py
+├─ cli_demo.py
+├─ seed_telemetry.py
 ├─ POI.csv
 ├─ README.md
 └─ sender_worker.py

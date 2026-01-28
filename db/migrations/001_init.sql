@@ -5,10 +5,14 @@
 create table if not exists pig_positions (
   id bigserial primary key,
   pig_id text not null,
+  tool_type text,
   ts timestamptz not null,
   gc integer,
   kp double precision
 );
+
+alter table pig_positions
+  add column if not exists tool_type text;
 
 create index if not exists idx_pig_positions_pig_ts
   on pig_positions (pig_id, ts desc);

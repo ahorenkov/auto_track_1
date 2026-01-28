@@ -367,8 +367,8 @@ class Engine:
         state = self.repo.get_state(pig_id)
 
         default_tool_type = "Cleaning Tool"
-        effective_tool = (getattr(state, "locked_tool_type", None) or (tool_type.strip() if tool_type else "") or default_tool_type)
-
+        # effective_tool = (getattr(state, "locked_tool_type", None) or (tool_type.strip() if tool_type else "") or default_tool_type)
+        
         # 1) last 5 minutes -> Moving/Stopped
         since_move = now - timedelta(seconds=cfg.stopped_window_sec)
         recent = self.repo.get_recent_positions(pig_id, since_dt=since_move)
@@ -378,6 +378,13 @@ class Engine:
         speed_samples = self.repo.get_recent_positions(pig_id, since_dt=since_speed)
 
         cur = _current_sample(speed_samples) or _current_sample(recent)
+        telemtry_tool = (cur.tool_type or "").strip() if getattr(cur, "tool_type", None) else ""
+        if telemtry_tool:
+            effective_tool = telemtry_tool
+            state.locked_tool_type = telemtry_tool
+        else:
+            effective_tool = default_tool_type
+
         if cur is None:
             return build_payload(
                 pig_id=pig_id,
@@ -469,6 +476,10 @@ class Engine:
 
         self.repo.save_state(pig_id, state)
 
+        computed_kp = cur.kp
+        if computed_kp is None and cur.gc is not None:
+            computed_kp = gc_to_kp.get(cur.gc)
+
         return build_payload(
             pig_id=pig_id,
             tool_type=effective_tool,
@@ -481,6 +492,6 @@ class Engine:
             eta_end=eta_end,
             legacy_route=legacy,
             current_gc=cur.gc,
-            current_kp=cur.kp,
+            current_kp=computed_kp,
             time=cur.dt,
         )

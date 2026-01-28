@@ -11,6 +11,7 @@ class PosSample:
     dt: datetime
     gc: Optional[int] = None   # Global Channel
     kp: Optional[float] = None # Kilometer Point
+    tool_type: Optional[str] = None # Tool Type
 
 
 @dataclass(frozen=True)
