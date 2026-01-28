@@ -16,10 +16,10 @@ def main() -> None:
     repo = CsvRepo(root_dir=".")  # expects POI.csv, GCtoKP.csv, gap.csv in current folder
 
     pig_id = "PIG_001"
-    tool_type = "UnknownTool"
-    now = datetime(2025, 12, 23, 8, 10, 0, tzinfo=MST)
+    tool_type = "Cleaning Tool"
+    now = datetime.now(tz=MST)
 
-    # Demo telemetry: include enough history (35 min) for long-window speed ref.
+    # Demo telemetry
     repo.set_demo_telemetry(
         pig_id,
         [

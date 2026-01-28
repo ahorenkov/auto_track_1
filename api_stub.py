@@ -6,7 +6,7 @@ from fastapi.responses import JSONResponse
 
 app = FastAPI(title="Local Ingest Stub")
 
-@app.post("/health")
+@app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
 
@@ -20,7 +20,7 @@ async def ingest(
     pig_id = body.get("Pig ID")
     notif_type = body.get("Notification Type")
 
-    print("/n=== INGEST ===")
+    print("\n=== INGEST ===")
     print(f"Time: {now}")
     print(f"Idempotency-Key: {idempotency_key}")
     print(f"Pig ID: {pig_id}")

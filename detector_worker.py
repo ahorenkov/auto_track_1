@@ -44,5 +44,6 @@ def run_detector():
         time.sleep(poll_every_seconds)
 
 if __name__ == "__main__":
+    print("Starting detector worker...")
     run_detector()
 

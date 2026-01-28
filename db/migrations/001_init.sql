@@ -40,11 +40,7 @@ create table if not exists notifications_outbox (
   last_error text,
   sent_at timestamptz,
   created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
+  updated_at timestamptz not null default now(),
+  locked_by text,
+  locked_at timestamptz
 );
-
-alter table notifications_outbox
-  add column if not exists locked_by text,
-  add column if not exists locked_at timestamptz,
-  add column if not exists sent_at timestamptz,
-  add column if not exists last_error text;

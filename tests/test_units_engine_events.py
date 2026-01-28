@@ -24,7 +24,6 @@ def _cfg():
         poi_tol_meters=50,
         stopped_window_sec=300,
         prepoi_time_window_sec=60,
-        eps_kp=1e-3,
         speed_window_sec=1500,
         speed_short_window_sec=300,
         moving_boost_sec=600,
