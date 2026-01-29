@@ -12,6 +12,11 @@ from core.state import InMemoryStateStore
 import psycopg
 import json
 
+import secrets
+
+def _make_approval_token() -> str:
+    return secrets.token_urlsafe(16)
+
 
 class TelemetryRepo(Protocol):
     """Repository interface. CSV and Postgres must implement these methods."""
@@ -241,20 +246,59 @@ class PostgresRepo:
             notif_type: str,
             payload: Dict[str, Any],
         ) -> bool:
+        approval_token = _make_approval_token()
         sql = """
-        INSERT INTO notifications_outbox (dedup_key, pig_id, notif_type, payload)
-        VALUES (%s, %s, %s, %s::jsonb)
+        INSERT INTO notifications_outbox (dedup_key, pig_id, notif_type, payload, status, approval_status, approval_token)
+        VALUES (%s, %s, %s, %s::jsonb, 'NEW', 'WAITING', %s)
         ON CONFLICT (dedup_key) DO NOTHING
         returning id
         """
         payload_json = json.dumps(payload, default=str)
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
-                cur.execute(sql, (dedup_key, pig_id, notif_type, payload_json))
+                cur.execute(sql, (dedup_key, pig_id, notif_type, payload_json, approval_token))
                 row = cur.fetchone()
             conn.commit()
         return row is not None
+    
+    def list_waiting_for_telegram(self, limit: int = 20):
+        sql = """
+        SELECT id, approval_token, payload
+        FROM notifications_outbox
+        WHERE approval_status = 'WAITING'
+          AND telegram_message_id IS NULL
+        ORDER BY created_at
+        LIMIT %s
+        """
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (limit,))
+                return cur.fetchall()
+        
+    def set_telegram_message_id(self, outbox_id: int, message_id: int) -> None:
+        sql = """
+        UPDATE notifications_outbox
+        SET telegram_message_id = %s
+        WHERE id = %s
+        """
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                cur.execute(sql, (message_id, outbox_id))
 
+    def decide_approval(self, outbox_id: int, token: str, decision: str, decided_by: str) -> bool:
+        sql = """
+        UPDATE notifications_outbox
+        SET approval_status = %s,
+            approval_decided_at = now(),
+            approval_decided_by = %s
+        WHERE id = %s
+          AND approval_status = 'WAITING'
+          AND approval_token = %s
+        """
+        with psycopg.connect(self.dsn) as conn:
+          with conn.cursor() as cur:
+              cur.execute(sql, (decision, decided_by, outbox_id, token))
+              return cur.rowcount == 1
 
 def _parse_dt(v):
     if isinstance(v, str):

@@ -48,3 +48,14 @@ create table if not exists notifications_outbox (
   locked_by text,
   locked_at timestamptz
 );
+
+ALTER TABLE notifications_outbox
+  ADD COLUMN IF NOT EXISTS approval_status text NOT NULL DEFAULT 'WAITING',
+  ADD COLUMN IF NOT EXISTS approval_token text,
+  ADD COLUMN IF NOT EXISTS approval_decided_at timestamptz,
+  ADD COLUMN IF NOT EXISTS approval_decided_by text,
+  ADD COLUMN IF NOT EXISTS telegram_message_id bigint;
+
+CREATE INDEX IF NOT EXISTS idx_outbox_waiting_telegram
+  ON notifications_outbox (status, approval_status)
+  WHERE approval_status = 'WAITING';

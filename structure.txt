@@ -24,3 +24,18 @@ AUTO_TRACK_1/
 ├─ POI.csv
 ├─ README.md
 └─ sender_worker.py
+
+
+TG 1735267735:AAG6W6EliHjN5gpGWjsMAxKto3EtEt5oko8
+
+$TOKEN="1735267735:AAG6W6EliHjN5gpGWjsMAxKto3EtEt5oko8"
+$CHAT="-1001234567890"
+$CHAT="-1003727734489" # chat id
+
+
+
+
+
+  curl.exe -X POST "https://api.telegram.org/bot$TOKEN/sendMessage" `
+  -d "chat_id=$CHAT" `
+  -d "text=Hello from auto_track"

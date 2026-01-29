@@ -72,7 +72,7 @@ class OutboxSender:
         select_sql = """
         SELECT id, dedup_key, pig_id, notif_type, payload, attempt_count
         FROM notifications_outbox
-        WHERE status IN ('NEW', 'RETRY')
+        WHERE status IN ('NEW', 'RETRY') AND approval_status='APPROVED'
           AND next_attempt_at <= now()
         ORDER BY id
         FOR UPDATE SKIP LOCKED
