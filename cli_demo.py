@@ -46,7 +46,8 @@ def main() -> None:
     )
 
     engine = Engine(repo, cfg=EngineConfig())
-    payload = engine.process_pig(pig_id=pig_id, tool_type=tool_type, now=now)
+    payload, state = engine.process_pig(pig_id=pig_id, tool_type=tool_type, now=now)
+    repo.save_state(pig_id, state)
     print(json.dumps(payload, ensure_ascii=False))
 
 

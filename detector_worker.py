@@ -30,25 +30,25 @@ def run_detector():
         pig_ids = repo.list_active_pigs(since_dt=since)
         print(f"[DEBUG] checking for active pigs {pig_ids}")
         for pig_id in pig_ids:
-            payload = engine.process_pig(pig_id=pig_id, tool_type=default_tool_type, now=now)
+            payload, state = engine.process_pig(pig_id=pig_id, tool_type=default_tool_type, now=now)
             print(f"[DEBUG] payload for pig_id={pig_id}: {payload}")
 
-            notif_type = payload.get("Notification Type")
-            if not notif_type:
-                continue
-
-            dedup_key = make_dedup_key(payload)
-            print(f"[DEBUG] notif_type='{payload.get('Notification Type')}' pig_event='{payload.get('Pig Event')}'")   
-            inserted = repo.enqueue_notification(
-                dedup_key=dedup_key,
+            notif_type=payload.get("Notification Type")
+            dedup_key = make_dedup_key(payload) if notif_type else None
+            inserted = repo.save_state_and_enqueue_notification(
                 pig_id=pig_id,
-                notif_type=str(notif_type),
-                payload=payload,
+                state=state,
+                dedup_key=dedup_key,
+                notif_type=str(notif_type) if notif_type else None,
+                payload=payload if notif_type else None,
             )
+
+            if notif_type:
+                print(f"[DEBUG] notif_type='{payload.get('Notification Type')}' pig_event='{payload.get('Pig Event')}'")
             if inserted:
                 print(f"[OUTBOX] inserted {dedup_key}")
             else:
-                print(f"[OUTBOX] skipped {dedup_key}")
+                print(f"[OUTBOX] skipped duplicate {dedup_key}")
 
         time.sleep(poll_every_seconds)
 

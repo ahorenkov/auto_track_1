@@ -261,6 +261,45 @@ class PostgresRepo:
             conn.commit()
         return row is not None
     
+    def save_state_and_enqueue_notification(
+            self,
+            pig_id: str,
+            state: PigState,
+            dedup_key: Optional[str],
+            notif_type: Optional[str],
+            payload: Optional[Dict[str, Any]],
+        ) -> bool:
+        """Atomicaly persist pig_state and (optionally) enqueue notification."""
+        state_sql = """
+        INSERT INTO pig_state (pig_id, state_json, updated_at)
+        VALUES (%s, %s::jsonb, NOW())
+        ON CONFLICT (pig_id)
+        DO UPDATE SET state_json = EXCLUDED.state_json, updated_at = NOW()
+        """
+        outbox_sql = """
+        INSERT INTO notifications_outbox (dedup_key, pig_id, notif_type, payload, status, approval_status, approval_token)
+        VALUES (%s, %s, %s, %s::jsonb, 'NEW', 'WAITING', %s)
+        ON CONFLICT (dedup_key) DO NOTHING
+        RETURNING id
+        """
+
+        state_json = json.dumps(asdict(state), default=str)
+
+        inserted = False
+        with psycopg.connect(self.dsn) as conn:
+            with conn.cursor() as cur:
+                # always save state
+                cur.execute(state_sql, (pig_id, state_json))
+                # optionally enqueue notification
+                if dedup_key and notif_type and payload is not None:
+                    approval_token = _make_approval_token()
+                    payload_json = json.dumps(payload, default=str)
+                    cur.execute(outbox_sql, (dedup_key, pig_id, notif_type, payload_json, approval_token))
+                    inserted = cur.fetchone() is not None
+            conn.commit()
+        return inserted
+
+    
     def list_waiting_for_telegram(self, limit: int = 20):
         sql = """
         SELECT id, approval_token, payload
@@ -284,6 +323,7 @@ class PostgresRepo:
         with psycopg.connect(self.dsn) as conn:
             with conn.cursor() as cur:
                 cur.execute(sql, (message_id, outbox_id))
+            conn.commit() 
 
     def decide_approval(self, outbox_id: int, token: str, decision: str, decided_by: str) -> bool:
         sql = """
@@ -298,7 +338,9 @@ class PostgresRepo:
         with psycopg.connect(self.dsn) as conn:
           with conn.cursor() as cur:
               cur.execute(sql, (decision, decided_by, outbox_id, token))
-              return cur.rowcount == 1
+              ok = cur.rowcount == 1
+          conn.commit()
+        return ok
 
 def _parse_dt(v):
     if isinstance(v, str):
@@ -341,6 +383,11 @@ def make_dedup_key(payload: Dict[str, Any]) -> str:
 
     ts = _parse_payload_ts(payload)
 
+    # POI passage: dedup by the POI was passed. (Ignore time)
+    if notif_type == "POI Passage":
+        passed_tag = (payload.get("Previous Valve Tag") or "").strip() or subject
+        return f"{pig_id}|{notif_type}|{passed_tag}|"
+    
     # 30-min update: bucket into fixed 30-minute windows.
     if notif_type == "30 Min Update" and ts is not None:
         bucket_min = (ts.minute // 30) * 30

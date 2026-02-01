@@ -358,7 +358,7 @@ class Engine:
         self._gaps = self.repo.get_gaps()
         self._routes = _build_routes(self._pois)
 
-    def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> Dict[str, Any]:
+    def process_pig(self, pig_id: str, tool_type: str, now: datetime) -> Tuple[Dict[str, Any], PigState]:
         cfg = self.cfg
         gc_to_kp = self._gc_to_kp
         gaps = self._gaps
@@ -400,7 +400,7 @@ class Engine:
                 current_gc=None,
                 current_kp=None,
                 time=now,
-            )
+            ), state
 
         # --- Legacy route (simple + sticky) ---
         legacy = pick_legacy_route(state, routes, cur, gc_to_kp, cfg, pig_event="Moving")
@@ -474,8 +474,6 @@ class Engine:
             cfg=cfg,
         )
 
-        self.repo.save_state(pig_id, state)
-
         computed_kp = cur.kp
         if computed_kp is None and cur.gc is not None:
             computed_kp = gc_to_kp.get(cur.gc)
@@ -494,4 +492,4 @@ class Engine:
             current_gc=cur.gc,
             current_kp=computed_kp,
             time=cur.dt,
-        )
+        ), state
