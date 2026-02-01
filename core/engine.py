@@ -252,6 +252,7 @@ def infer_notification_type(
     cur: PosSample,
     legacy_route: str,
     route: List[POI],
+    prev_poi: Optional[POI],
     next_poi: Optional[POI],
     end_poi: Optional[POI],
     gaps: List[GapPoint],
@@ -267,11 +268,14 @@ def infer_notification_type(
         return "Run Completion"
     if end_poi and _is_close_to_poi(cur, end_poi, gc_to_kp, cfg):
         return "Run Completion"
-
+    
     # 2) POI Passage
-    for p in route:
-        if _is_close_to_poi(cur, p, gc_to_kp, cfg):
-            return "POI Passage"
+    if prev_poi and _is_close_to_poi(cur, prev_poi, gc_to_kp, cfg):
+        return "POI Passage"
+    if prev_poi is None:
+        for p in route:
+            if _is_close_to_poi(cur, p, gc_to_kp, cfg):
+                return "POI Passage"
 
     # 3) Gap Start/End
     for g in gaps:
@@ -466,6 +470,7 @@ class Engine:
             cur=cur,
             legacy_route=legacy,
             route=route,
+            prev_poi=prev_poi,
             next_poi=next_poi,
             end_poi=end_poi,
             gaps=gaps,
